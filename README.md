@@ -1,8 +1,14 @@
-# TFM
-AI Agent Gene Editing
+# AI Agent for Gene Editing
 
-## Test Tutorial
-Test
+This project is being developed as part of my master thesis (15 etcs) for the Master in Bioinformatics and Biostatistics at UOC university. 
+
+# Phases
+
+1 Gene editing tool calling through APIs
+
+2 Web search calling 
+
+3 Implementation of RAG
 
 whatever
 
