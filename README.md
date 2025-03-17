@@ -10,6 +10,3 @@ This project is being developed as part of my master thesis (15 etcs) for the Ma
 
 3 Implementation of RAG
 
-whatever
-
-xxxxx
