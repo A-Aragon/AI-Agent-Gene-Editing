@@ -1,10 +1,8 @@
 import os
 
 from openai import OpenAI
-
-from dotenv import load_dotenv
-
-load_dotenv()
+ 
+# USING API KEYS SAFELY -> https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
