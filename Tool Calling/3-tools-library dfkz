@@ -1,0 +1,29 @@
+import requests
+
+def get_gene_info_by_symbol(symbol):
+    """Consulta la API de GenomeCRISPR para obtener la información de un gen por su símbolo."""
+    url = "https://genomecrispr.dkfz.de/api/genes"
+    headers = {"Content-Type": "application/json"}
+    data = {"query": symbol, "field": "symbol"}
+
+    # Realizamos la solicitud POST
+    response = requests.post(url, headers=headers, json=data)
+
+    # Si la respuesta es exitosa (status 200), mostramos los resultados
+    if response.status_code == 200:
+        return response.json()  # Devuelve los datos en formato JSON
+    else:
+        return f"Error: {response.status_code} - {response.text}"
+
+# ----------------------------
+# Solicitar símbolo de gen al usuario
+# ----------------------------
+
+symbol = input("Introduce el símbolo del gen para consultar la información (e.g., POLR2A): ")
+
+# Llamamos a la función con el símbolo del gen ingresado
+result = get_gene_info_by_symbol(symbol)
+
+# Mostramos el resultado
+print(result)
+

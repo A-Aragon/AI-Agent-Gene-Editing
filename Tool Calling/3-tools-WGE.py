@@ -1,5 +1,3 @@
-# WGE - CRISPR based on exons
-
 import json
 import os
 import requests
@@ -136,3 +134,4 @@ print("\nCRISPR Guides retrieved:")
 print("Exon ID:", final_response.exon_id)
 for i, guide in enumerate(final_response.crispr_guides, 1):
     print(f"{i}. {guide}")
+

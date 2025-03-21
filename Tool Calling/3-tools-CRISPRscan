@@ -1,0 +1,15 @@
+#import requests
+
+#url = "https://api.crisprscan.org/config"  # Replace with the correct endpoint URL
+
+## Sending a simple GET request
+#response = requests.get(url)
+
+## Check if the request was successful (status code 200)
+#if response.status_code == 200:
+    #print("API is accessible!")
+    #print("Response:", response.json())  # Print the response content if it's JSON
+#else:
+    #print(f"API request failed with status code: {response.status_code}")
+
+
