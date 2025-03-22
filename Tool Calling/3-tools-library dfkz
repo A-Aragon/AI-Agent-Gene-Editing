@@ -1,29 +1,124 @@
 import requests
 
-def get_gene_info_by_symbol(symbol):
+def get_gene_info(symbol):
     """Consulta la API de GenomeCRISPR para obtener la información de un gen por su símbolo."""
     url = "https://genomecrispr.dkfz.de/api/genes"
     headers = {"Content-Type": "application/json"}
     data = {"query": symbol, "field": "symbol"}
 
-    # Realizamos la solicitud POST
     response = requests.post(url, headers=headers, json=data)
+    return response.json() if response.status_code == 200 else None
 
-    # Si la respuesta es exitosa (status 200), mostramos los resultados
-    if response.status_code == 200:
-        return response.json()  # Devuelve los datos en formato JSON
-    else:
-        return f"Error: {response.status_code} - {response.text}"
+def get_sgrnas(symbol):
+    """Consulta la API de GenomeCRISPR para obtener los sgRNAs relacionados con un gen."""
+    url = "https://genomecrispr.dkfz.de/api/sgrnas/symbol"
+    headers = {"Content-Type": "application/json"}
+    data = {"query": symbol}
 
-# ----------------------------
-# Solicitar símbolo de gen al usuario
-# ----------------------------
+    response = requests.post(url, headers=headers, json=data)
+    return response.json() if response.status_code == 200 else None
 
-symbol = input("Introduce el símbolo del gen para consultar la información (e.g., POLR2A): ")
+def get_screening_experiments():
+    """Consulta la API de GenomeCRISPR para obtener experimentos de screening CRISPR."""
+    url = "https://genomecrispr.dkfz.de/api/experiments"
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "pubmed": {
+            "$in": [
+                "26472758", "26627737", "24336569", "25494202", "27260157", "27013184",
+                "27453484", "24336571", "27383988", "26780180", "27760321", "27661255",
+                "27260156", "27869803", "28162770", "999999", "28145866", "28700943", "29083409"
+            ]
+        }
+    }
 
-# Llamamos a la función con el símbolo del gen ingresado
-result = get_gene_info_by_symbol(symbol)
+    response = requests.post(url, headers=headers, json=data)
+    return response.json() if response.status_code == 200 else None
 
-# Mostramos el resultado
-print(result)
+def display_gene_info(gene_data):
+    """Muestra la información del gen en un formato claro."""
+    if not gene_data:
+        print("No se encontró información del gen.")
+        return
+
+    print("\n=== Información del Gen ===")
+    print(f"🔹 Símbolo: {gene_data.get('symbol', 'N/A')}")
+    print(f"🔹 ID Ensembl: {gene_data.get('ensg', 'N/A')}")
+    print(f"🔹 Cromosoma: {gene_data.get('chr', 'N/A')} (Strand: {gene_data.get('strand', 'N/A')})")
+    print(f"🔹 Posición: {gene_data.get('start', 'N/A')} - {gene_data.get('end', 'N/A')}")
+    print("\n🔹 Secuencia (primeros 100 nucleótidos):")
+    print(gene_data.get("seq", "N/A")[:100] + "...")
+
+    print("\n=== Transcripciones ===")
+    for transcript in gene_data.get("transcripts", []):
+        print(f"🔸 ID: {transcript.get('id', 'N/A')}")
+        for exon in transcript.get("exons", []):
+            print(f"   - Exón {exon.get('id', 'N/A')}: {exon.get('start', 'N/A')} - {exon.get('end', 'N/A')}")
+        print("")
+
+def display_sgrnas(sgrna_data):
+    """Muestra la información de los sgRNAs relacionados con el gen en una línea."""
+    if not sgrna_data:
+        print("\nNo se encontraron sgRNAs para este gen.")
+        return
+
+    print("\n=== sgRNAs Relacionados ===")
+    for sgrna in sgrna_data:
+        position = f"{sgrna.get('start', 'N/A')}-{sgrna.get('end', 'N/A')}"
+        sequence = sgrna.get('sequence', 'N/A')
+        pam = "NGG"  # Asumimos que el PAM es "NGG", ya que se utiliza comúnmente en CRISPR-Cas9
+        target = sgrna.get('genetargets', 'N/A').split("::")[0]  # Extraer solo el gen objetivo
+        effect = sgrna.get('effect', 'N/A')
+        min_effect = effect  # Este dato puede ser extraído si se tiene información adicional, por ahora lo dejamos igual
+        max_effect = effect  # Igual que el min_effect
+
+        print(f"🔸 Position: {position} | Sequence: {sequence} | PAM: {pam} | Target: {target} | Min Effect: {min_effect} | Max Effect: {max_effect} | Effect: {effect}")
+
+def display_screening_experiments(experiments):
+    """Muestra la información de los experimentos de screening CRISPR en formato de tabla para cada publicación."""
+    if not experiments:
+        print("\nNo se encontraron experimentos de screening.")
+        return
+
+    for exp in experiments:
+        pubmed_id = exp.get('pubmed', 'N/A')
+        title = exp.get('title', 'N/A')
+        authors = ', '.join([' '.join(author) for author in exp.get('authors', [])])
+
+        print(f"\n=== PubMed ID: {pubmed_id} ===")
+        print(f"🔹 Título: {title}")
+        print(f"🔹 Autores: {authors}")
+
+        print(f"\n{'Screen ID':<10} | {'Cell Line':<12} | {'Cas-9 Variant':<12} | {'Screen Type':<15} | {'Screen':<6} | {'Performance':<17} | {'Hit'}")
+        print("-" * 100)
+
+        for cell_line, details in exp.get("condition", {}).items():
+            for condition, values in details.items():
+                screen_id = values.get("screenid", "N/A")
+                cas9_variant = values.get("cas9_variant", "N/A")
+                screen_type = values.get("screen_type", "N/A")
+                screen = values.get("screen", "N/A")
+                max_fc = values.get("maxfc", "N/A")
+                min_fc = values.get("minfc", "N/A")
+                performance = f"{max_fc} / {min_fc}"
+                hit = values.get("hit", "N/A")
+                
+                print(f"{screen_id:<10} | {cell_line:<12} | {cas9_variant:<12} | {screen_type:<15} | {screen:<6} | {performance:<17} | {hit}")
+
+        print("=" * 100)
+
+# Solicitar símbolo del gen al usuario
+symbol = input("Introduce el símbolo del gen para consultar la información (e.g., POLR2A): ").strip().upper()
+
+# Obtener información del gen
+gene_data = get_gene_info(symbol)
+display_gene_info(gene_data)
+
+# Obtener sgRNAs relacionados con el gen
+sgrna_data = get_sgrnas(symbol)
+display_sgrnas(sgrna_data)
+
+# Obtener experimentos de screening
+experiments = get_screening_experiments()
+display_screening_experiments(experiments)
 
