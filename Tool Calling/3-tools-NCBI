@@ -1,1 +1,154 @@
+import requests
+import urllib.parse
+import json
 
+class ESearchAgent:
+    def __init__(self, base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"):
+        self.base_url = base_url
+
+    def build_query(self, db, term, **kwargs):
+        """
+        Construye la URL de la consulta ESearch.
+        """
+        params = {
+            "db": db,
+            "term": term,
+            "retmode": kwargs.get("retmode", "json"),
+            "retmax": kwargs.get("retmax", 20),
+            "retstart": kwargs.get("retstart", 0),
+            "usehistory": kwargs.get("usehistory", "y"),
+            "sort": kwargs.get("sort"),
+            "datetype": kwargs.get("datetype"),
+            "reldate": kwargs.get("reldate"),
+            "mindate": kwargs.get("mindate"),
+            "maxdate": kwargs.get("maxdate"),
+            "field": kwargs.get("field"),
+            "WebEnv": kwargs.get("WebEnv"),
+            "query_key": kwargs.get("query_key"),
+            "rettype": kwargs.get("rettype"),
+            "idtype": kwargs.get("idtype")
+        }
+
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        return self.base_url, clean_params
+
+    def search(self, db, term, **kwargs):
+        """
+        Realiza la consulta a ESearch y devuelve los resultados.
+        """
+        url, params = self.build_query(db, term, **kwargs)
+        encoded_params = urllib.parse.urlencode(params)
+        full_url = f"{url}?{encoded_params}"
+
+        try:
+            response = requests.get(full_url)
+            response.raise_for_status()
+
+            if params.get("retmode", "json") == "json":
+                data = response.json()
+                if "esearchresult" not in data:
+                    raise ValueError("La respuesta JSON no contiene 'esearchresult'.")
+                return data
+            else:
+                return response.text
+
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Error en la petición ESearch: {e}")
+        except json.JSONDecodeError:
+            raise Exception("Error al decodificar la respuesta JSON.")
+        except ValueError as e:
+            raise Exception(f"Error en la estructura de la respuesta: {e}")
+
+class ESummaryAgent:
+    def __init__(self, base_url="https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"):
+        self.base_url = base_url
+
+    def get_summary(self, db, ids=None, query_key=None, WebEnv=None, **kwargs):
+        """
+        Obtiene los resúmenes de los documentos (DocSums) para los UIDs dados.
+        """
+        params = {
+            "db": db,
+            "id": ",".join(ids) if ids else None,
+            "query_key": query_key,
+            "WebEnv": WebEnv,
+            "retmode": kwargs.get("retmode", "json"),
+            "retstart": kwargs.get("retstart"),
+            "retmax": kwargs.get("retmax"),
+            "version": kwargs.get("version")
+        }
+
+        clean_params = {k: v for k, v in params.items() if v is not None}
+        encoded_params = urllib.parse.urlencode(clean_params)
+        full_url = f"{self.base_url}?{encoded_params}"
+
+        try:
+            response = requests.get(full_url)
+            response.raise_for_status()
+
+            if params.get("retmode", "json") == "json":
+                return response.json()
+            else:
+                return response.text
+
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Error en la petición ESummary: {e}")
+        except json.JSONDecodeError:
+            raise Exception("Error al decodificar la respuesta JSON.")
+
+# -------------------------------
+# Interacción con el usuario
+# -------------------------------
+
+if __name__ == "__main__":
+    esearch_agent = ESearchAgent()
+    esummary_agent = ESummaryAgent()
+
+    db = input("Ingrese la base de datos (por ejemplo, pubmed): ")
+    term = input("Ingrese el término de búsqueda: ")
+
+    kwargs = {}
+    reldate = input("Ingrese la cantidad de días para filtrar por fecha (opcional, presione Enter para omitir): ")
+    if reldate:
+        kwargs["reldate"] = reldate
+        kwargs["datetype"] = input("Ingrese el tipo de fecha (por ejemplo, edat): ")
+
+    retmax = input("Ingrese el número máximo de resultados (opcional, presione Enter para el valor predeterminado 20): ")
+    if retmax:
+        kwargs["retmax"] = retmax
+
+    retmode = input("Ingrese el modo de retorno (json o xml, presione Enter para json): ")
+    if retmode:
+        kwargs["retmode"] = retmode
+
+    results = esearch_agent.search(db, term, **kwargs)
+
+    if "esearchresult" in results and results["esearchresult"]["count"] != "0":
+        print(" Resultados encontrados:", results["esearchresult"]["count"])
+        uids = results["esearchresult"].get("idlist", [])
+        print("🆔 UIDs:", uids)
+
+        if uids:
+            if input("¿Desea obtener los resúmenes de los documentos? (s/n): ").lower() == "s":
+                summary_results = esummary_agent.get_summary(db, ids=uids)
+                if "result" in summary_results:
+                    print("\nResúmenes de los documentos:")
+                    for uid, summary in summary_results["result"].items():
+                        if uid != "uids":
+                            print(f"\nUID: {uid}")
+                            print(f"Título: {summary.get('title', 'N/A')}")
+                            if 'authors' in summary:
+                                print(f"Primer Autor: {summary['authors'][0]['name']}")
+                                print(f"Último Autor: {summary['authors'][-1]['name']}")
+                            print(f"DOI: {summary.get('elocationid', 'N/A')}") #<- cambio de 'doi' a 'elocationid'
+                            print(f"Fecha: {summary.get('pubdate', 'N/A')}")
+                            print(f"Revista: {summary.get('source', 'N/A')}")
+                else:
+                    print("No se pudieron obtener los resúmenes.")
+            else:
+                print("Resúmenes no solicitados.")
+        else:
+            print("No se encontraron UIDs para obtener resúmenes.")
+
+    else:
+        print("❌ No se encontraron resultados.")
