@@ -1,0 +1,134 @@
+import json
+import os
+import requests
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ----------------------------
+# Función que llama a la API de WGE para obtener off-targets
+# ----------------------------
+
+def get_off_targets(species, sequence, pam_right):
+    """Recupera off-targets para una secuencia CRISPR usando la API de WGE."""
+    url = "https://wge.stemcell.sanger.ac.uk/api/off_targets_by_seq"
+    params = {
+        "species": species,
+        "seq": sequence,
+        "pam_right": str(pam_right).lower()
+    }
+    
+    response = requests.get(url, params=params)
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print("Error:", response.status_code, response.text)
+        return None
+
+# ----------------------------
+# Definimos la herramienta
+# ----------------------------
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_off_targets",
+            "description": "Recupera off-targets para una secuencia CRISPR y especie usando la API de WGE.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "species": {"type": "string"},
+                    "sequence": {"type": "string", "description": "20bp CRISPR sequence"},
+                    "pam_right": {"type": "boolean", "description": "True si el PAM está a la derecha, False en caso contrario."}
+                },
+                "required": ["species", "sequence", "pam_right"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    }
+]
+
+system_prompt = "Eres un asistente que ayuda a encontrar off-targets para secuencias CRISPR."
+
+# ----------------------------
+# Input del usuario
+# ----------------------------
+
+user_input = input("Ask your question (e.g., Off-targets for sequence TTAATTGGTCAGCCTAACTC in Mouse): ")
+
+messages = [
+    {"role": "system", "content": system_prompt},
+    {"role": "user", "content": user_input},
+]
+
+# ----------------------------
+# Llamada al modelo
+# ----------------------------
+
+completion = client.chat.completions.create(
+    model="gpt-4o",
+    messages=messages,
+    tools=tools,
+)
+
+# Mostrar qué decidió hacer GPT
+print("\nGPT decided to call:")
+print("Function:", completion.choices[0].message.tool_calls[0].function.name)
+print("Arguments:", json.loads(completion.choices[0].message.tool_calls[0].function.arguments))
+
+# ----------------------------
+# Ejecutamos la función real
+# ----------------------------
+
+def call_function(name, args):
+    if name == "get_off_targets":
+        args['species'] = args['species'].capitalize()
+        return get_off_targets(**args)
+
+for tool_call in completion.choices[0].message.tool_calls:
+    name = tool_call.function.name
+    args = json.loads(tool_call.function.arguments)
+    messages.append(completion.choices[0].message)
+
+    result = call_function(name, args)
+    messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": json.dumps(result)
+    })
+
+# ----------------------------
+# Definimos el esquema del resultado
+# ----------------------------
+
+class OffTargetResponse(BaseModel):
+    sequence: str = Field(description="20bp CRISPR sequence")
+    off_targets: list[int] = Field(description="Lista de IDs de off-targets detectados")
+    off_target_summary: str = Field(description="Resumen de off-targets")
+
+# ----------------------------
+# Segunda llamada a GPT con resultados reales
+# ----------------------------
+
+completion_2 = client.beta.chat.completions.parse(
+    model="gpt-4o",
+    messages=messages,
+    tools=tools,
+    response_format=OffTargetResponse,
+)
+
+# ----------------------------
+# Mostramos respuesta final
+# ----------------------------
+
+final_response = completion_2.choices[0].message.parsed
+
+print("\nOff-Targets retrieved:")
+print("Sequence:", final_response.sequence)
+print("Off-Target Summary:", final_response.off_target_summary)
+for i, off_target in enumerate(final_response.off_targets, 1):
+    print(f"{i}. {off_target}")
