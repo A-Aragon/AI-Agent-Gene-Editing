@@ -96,15 +96,58 @@ class ESummaryAgent:
         except json.JSONDecodeError:
             raise Exception("Error al decodificar la respuesta JSON.")
 
-# -------------------------------
-# Interacción con el usuario
-# -------------------------------
+def print_summary(summary_results):
+    if "result" in summary_results:
+        print("\nResúmenes de los documentos:")
+        for uid, summary in summary_results["result"].items():
+            if uid != "uids":
+                print(f"\nUID: {uid}")
+                print(f"Título: {summary.get('title', 'N/A')}")
+                if 'authors' in summary:
+                    print(f"Primer Autor: {summary['authors'][0]['name']}")
+                    print(f"Último Autor: {summary['authors'][-1]['name']}")
+                print(f"DOI: {summary.get('elocationid', 'N/A')}")
+                print(f"Fecha: {summary.get('pubdate', 'N/A')}")
+                print(f"Revista: {summary.get('source', 'N/A')}")
+    else:
+        print("No se pudieron obtener los resúmenes.")
+
+def get_database_list():
+    """Obtiene y devuelve la lista de bases de datos disponibles en Entrez."""
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi"
+    params = {"retmode": "json"}
+    encoded_params = urllib.parse.urlencode(params)
+    full_url = f"{base_url}?{encoded_params}"
+
+    try:
+        response = requests.get(full_url)
+        response.raise_for_status()
+        data = response.json()
+        if "einforesult" in data and "dblist" in data["einforesult"]:
+            return data["einforesult"]["dblist"]
+        else:
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error al obtener la lista de bases de datos: {e}")
+        return None
+    except json.JSONDecodeError:
+        print("Error al decodificar la respuesta JSON.")
+        return None
 
 if __name__ == "__main__":
     esearch_agent = ESearchAgent()
     esummary_agent = ESummaryAgent()
 
-    db = input("Ingrese la base de datos (por ejemplo, pubmed): ")
+    # Obtener y mostrar la lista de bases de datos disponibles antes de la interacción con el usuario
+    databases = get_database_list()
+    if databases:
+        print("Bases de datos disponibles:")
+        for db in databases:
+            print(f"- {db}")
+    else:
+        print("No se pudo obtener la lista de bases de datos.")
+
+    db = input("Ingrese la base de datos (por ejemplo, pubmed, protein, nuccore, etc.): ")
     term = input("Ingrese el término de búsqueda: ")
 
     kwargs = {}
@@ -131,20 +174,14 @@ if __name__ == "__main__":
         if uids:
             if input("¿Desea obtener los resúmenes de los documentos? (s/n): ").lower() == "s":
                 summary_results = esummary_agent.get_summary(db, ids=uids)
-                if "result" in summary_results:
-                    print("\nResúmenes de los documentos:")
-                    for uid, summary in summary_results["result"].items():
-                        if uid != "uids":
-                            print(f"\nUID: {uid}")
-                            print(f"Título: {summary.get('title', 'N/A')}")
-                            if 'authors' in summary:
-                                print(f"Primer Autor: {summary['authors'][0]['name']}")
-                                print(f"Último Autor: {summary['authors'][-1]['name']}")
-                            print(f"DOI: {summary.get('elocationid', 'N/A')}") #<- cambio de 'doi' a 'elocationid'
-                            print(f"Fecha: {summary.get('pubdate', 'N/A')}")
-                            print(f"Revista: {summary.get('source', 'N/A')}")
-                else:
-                    print("No se pudieron obtener los resúmenes.")
+                try:
+                    if db.lower() == "pubmed":
+                        print_summary(summary_results)
+                    else:
+                        print(json.dumps(summary_results, indent=4))
+                except Exception as e:
+                    print(f"Error al procesar los resúmenes: {e}")
+                    print(json.dumps(summary_results, indent=4)) #Imprime el json en crudo para poder ver que esta devolviendo la API.
             else:
                 print("Resúmenes no solicitados.")
         else:
