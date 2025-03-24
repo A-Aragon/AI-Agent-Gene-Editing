@@ -59,10 +59,15 @@ system_prompt = "Eres un asistente que ayuda a encontrar off-targets para secuen
 # ----------------------------
 
 user_input = input("Ask your question (e.g., Off-targets for sequence TTAATTGGTCAGCCTAACTC in Mouse): ")
+pam_right_input = input("Is the PAM on the right? (yes/no): ").strip().lower()
+pam_right = pam_right_input in ["yes", "y", "true"]
+
+# Incluir explícitamente la información en el mensaje
+formatted_input = f"{user_input}. PAM on the right: {pam_right}"
 
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": user_input},
+    {"role": "user", "content": formatted_input},  # Se añade la información de PAM
 ]
 
 # ----------------------------
@@ -87,6 +92,7 @@ print("Arguments:", json.loads(completion.choices[0].message.tool_calls[0].funct
 def call_function(name, args):
     if name == "get_off_targets":
         args['species'] = args['species'].capitalize()
+        args['pam_right'] = pam_right  # Aseguramos que se use la elección del usuario
         return get_off_targets(**args)
 
 for tool_call in completion.choices[0].message.tool_calls:
