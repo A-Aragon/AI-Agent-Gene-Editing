@@ -1,0 +1,123 @@
+import json
+import os
+import requests
+from openai import OpenAI
+
+# Initialize OpenAI client with API key
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# ----------------------------
+# Functions for calling APIs
+# ----------------------------
+
+def get_crisprs_by_exon(species, exon_ids):
+    url = "https://wge.stemcell.sanger.ac.uk/api/crispr_search"
+    params = {"species": species.capitalize(), "exon_id[]": exon_ids}
+    response = requests.get(url, params=params)
+    return response.json() if response.status_code == 200 else None
+
+def get_off_targets(species, sequence, pam_right):
+    url = "https://wge.stemcell.sanger.ac.uk/api/off_targets_by_seq"
+    params = {"species": species, "seq": sequence, "pam_right": str(pam_right).lower()}
+    response = requests.get(url, params=params)
+    return response.json() if response.status_code == 200 else None
+
+def get_forecast_predictions(target, pam_position):
+    url = "https://elixir.ut.ee/forecast/api/predict"
+    payload = {"target": target, "pam_position": pam_position}
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(url, json=payload, headers=headers)
+    return response.json() if response.status_code == 200 else None
+
+def get_gene_info(symbol):
+    url = "https://genomecrispr.dkfz.de/api/genes"
+    headers = {"Content-Type": "application/json"}
+    data = {"query": symbol, "field": "symbol"}
+    response = requests.post(url, headers=headers, json=data)
+    return response.json() if response.status_code == 200 else None
+
+def get_sgrnas(symbol):
+    url = "https://genomecrispr.dkfz.de/api/sgrnas/symbol"
+    headers = {"Content-Type": "application/json"}
+    data = {"query": symbol}
+    response = requests.post(url, headers=headers, json=data)
+    return response.json() if response.status_code == 200 else None
+
+def get_screening_experiments():
+    url = "https://genomecrispr.dkfz.de/api/experiments"
+    headers = {"Content-Type": "application/json"}
+    data = {"pubmed": {"$in": ["26472758", "26627737", "24336569"]}}  # Shortened for brevity
+    response = requests.post(url, headers=headers, json=data)
+    return response.json() if response.status_code == 200 else None
+
+# ----------------------------
+# Define tools
+# ----------------------------
+
+tools = [
+    {"type": "function", "function": {"name": "get_crisprs_by_exon", "description": "Retrieve CRISPR guides for a species and list of exon IDs.", "parameters": {"type": "object", "properties": {"species": {"type": "string"}, "exon_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["species", "exon_ids"]}}},
+    {"type": "function", "function": {"name": "get_off_targets", "description": "Retrieve off-targets for a CRISPR sequence.", "parameters": {"type": "object", "properties": {"species": {"type": "string"}, "sequence": {"type": "string"}, "pam_right": {"type": "boolean"}}, "required": ["species", "sequence", "pam_right"]}}},
+    {"type": "function", "function": {"name": "get_forecast_predictions", "description": "Retrieve CRISPR editing predictions using Elixir Forecast API.", "parameters": {"type": "object", "properties": {"target": {"type": "string"}, "pam_position": {"type": "integer"}}, "required": ["target", "pam_position"]}}},
+    {"type": "function", "function": {"name": "get_gene_info", "description": "Retrieve gene information from GenomeCRISPR.", "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}},
+    {"type": "function", "function": {"name": "get_sgrnas", "description": "Retrieve sgRNAs associated with a gene from GenomeCRISPR.", "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}},
+    {"type": "function", "function": {"name": "get_screening_experiments", "description": "Retrieve CRISPR screening experiments from GenomeCRISPR.", "parameters": {"type": "object", "properties": {}}, "required": []}}]
+
+system_prompt = "You are an assistant that helps find CRISPR guides, off-targets, gene information, and screening experiments."
+
+# ----------------------------
+# User Input
+# ----------------------------
+
+user_input = input("Enter your request (e.g., gene info for POLR2A, guides for exon ENSMUSE00000106755): ")
+messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
+
+# ----------------------------
+# Call OpenAI model
+# ----------------------------
+
+completion = client.chat.completions.create(model="gpt-4o", messages=messages, tools=tools)
+
+if completion.choices and completion.choices[0].message.tool_calls:
+    tool_call = completion.choices[0].message.tool_calls[0]
+    function_name = tool_call.function.name
+    function_args = json.loads(tool_call.function.arguments)
+
+    print("\nGPT decided to call:")
+    print("Function:", function_name)
+    print("Arguments:", function_args)
+
+    def call_function(name, args):
+        if name == "get_crisprs_by_exon":
+            return get_crisprs_by_exon(args["species"], args["exon_ids"])
+        elif name == "get_off_targets":
+            return get_off_targets(args["species"], args["sequence"], args["pam_right"])
+        elif name == "get_forecast_predictions":
+            return get_forecast_predictions(args["target"], args["pam_position"])
+        elif name == "get_gene_info":
+            return get_gene_info(args["symbol"])
+        elif name == "get_sgrnas":
+            return get_sgrnas(args["symbol"])
+        elif name == "get_screening_experiments":
+            return get_screening_experiments()
+        else:
+            print("Unknown function:", name)
+            return None
+
+    result = call_function(function_name, function_args)
+    
+    if result:
+        print("\nFunction Result:", json.dumps(result, indent=2))
+    else:
+        print("\nNo results returned from the function call.")
+else:
+    print("GPT did not decide to call any function.")
+
+
+
+# PROBLEMS 
+
+# When calling the off target, this app does not recognize it eith "Off-targets for sequence TTAATTGGTCAGCCTAACTC in Mouse" 
+#  pero si me pilla off TTAATTGGTCAGCCTAACTC in Mouse - puede que no me pille las mayusculas o el guion o qué? 
+# IMP. Ademas no me ha preguntado por la PAM si es right o no - ha deducido directamente que era right 
+
+# NO OLVIDES CHEQUEAR LOS OUTPUT - ESTAN SIENDO EN BRUTO 
