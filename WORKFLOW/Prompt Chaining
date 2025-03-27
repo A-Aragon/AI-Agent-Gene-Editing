@@ -3,76 +3,135 @@ import os
 import requests
 from openai import OpenAI
 
-# Initialize OpenAI client with API key
+# ----------------------------
+# Initialize OpenAI client
+# ----------------------------
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ----------------------------
-# Functions for calling APIs
+# API Functions
 # ----------------------------
 
 def get_crisprs_by_exon(species, exon_ids):
     url = "https://wge.stemcell.sanger.ac.uk/api/crispr_search"
     params = {"species": species.capitalize(), "exon_id[]": exon_ids}
     response = requests.get(url, params=params)
-    return response.json() if response.status_code == 200 else None
+    return handle_response(response)
 
 def get_off_targets(species, sequence, pam_right):
     url = "https://wge.stemcell.sanger.ac.uk/api/off_targets_by_seq"
     params = {"species": species, "seq": sequence, "pam_right": str(pam_right).lower()}
     response = requests.get(url, params=params)
-    return response.json() if response.status_code == 200 else None
+    return handle_response(response)
 
 def get_forecast_predictions(target, pam_position):
     url = "https://elixir.ut.ee/forecast/api/predict"
     payload = {"target": target, "pam_position": pam_position}
     headers = {"Content-Type": "application/json"}
     response = requests.post(url, json=payload, headers=headers)
-    return response.json() if response.status_code == 200 else None
+    return handle_response(response)
 
 def get_gene_info(symbol):
     url = "https://genomecrispr.dkfz.de/api/genes"
     headers = {"Content-Type": "application/json"}
     data = {"query": symbol, "field": "symbol"}
     response = requests.post(url, headers=headers, json=data)
-    return response.json() if response.status_code == 200 else None
+    return handle_response(response)
 
 def get_sgrnas(symbol):
     url = "https://genomecrispr.dkfz.de/api/sgrnas/symbol"
     headers = {"Content-Type": "application/json"}
     data = {"query": symbol}
     response = requests.post(url, headers=headers, json=data)
-    return response.json() if response.status_code == 200 else None
+    return handle_response(response)
 
-def get_screening_experiments():
-    url = "https://genomecrispr.dkfz.de/api/experiments"
-    headers = {"Content-Type": "application/json"}
-    data = {"pubmed": {"$in": ["26472758", "26627737", "24336569"]}}  # Shortened for brevity
-    response = requests.post(url, headers=headers, json=data)
-    return response.json() if response.status_code == 200 else None
+def get_screening_experiments(symbol):
+    """Llama internamente a get_sgrnas y luego a la API de experimentos."""
+    sgrna_data = get_sgrnas(symbol)
+    if sgrna_data:
+        sgrna_pubmed_ids = [item.get('pubmed') for item in sgrna_data if item.get('pubmed') != 'N/A']
+        unique_pubmed_ids = sorted(list(set(sgrna_pubmed_ids)), key=int)
+        url = "https://genomecrispr.dkfz.de/api/experiments"
+        headers = {"Content-Type": "application/json"}
+        data = {"pubmed": {"$in": unique_pubmed_ids}}
+        response = requests.post(url, headers=headers, json=data)
+        return handle_response(response)
+    else:
+        return None
+
+def handle_response(response):
+    """Handle API responses and return JSON or error messages."""
+    if response.status_code != 200:
+        print(f"Error {response.status_code}: {response.text}")  # Debugging
+        return None
+    try:
+        result = response.json()
+        if not result:
+            print("No data returned.")
+        return result
+    except json.JSONDecodeError:
+        print("Failed to decode JSON response:", response.text)
+        return None
 
 # ----------------------------
-# Define tools
+# Function Map
 # ----------------------------
+function_map = {
+    "get_crisprs_by_exon": get_crisprs_by_exon,
+    "get_off_targets": get_off_targets,
+    "get_forecast_predictions": get_forecast_predictions,
+    "get_gene_info": get_gene_info,
+    "get_sgrnas": get_sgrnas,
+    "get_screening_experiments": get_screening_experiments,
+}
 
+# ----------------------------
+# Define OpenAI Tools
+# ----------------------------
 tools = [
-    {"type": "function", "function": {"name": "get_crisprs_by_exon", "description": "Retrieve CRISPR guides for a species and list of exon IDs.", "parameters": {"type": "object", "properties": {"species": {"type": "string"}, "exon_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["species", "exon_ids"]}}},
-    {"type": "function", "function": {"name": "get_off_targets", "description": "Retrieve off-targets for a CRISPR sequence.", "parameters": {"type": "object", "properties": {"species": {"type": "string"}, "sequence": {"type": "string"}, "pam_right": {"type": "boolean"}}, "required": ["species", "sequence", "pam_right"]}}},
-    {"type": "function", "function": {"name": "get_forecast_predictions", "description": "Retrieve CRISPR editing predictions using Elixir Forecast API.", "parameters": {"type": "object", "properties": {"target": {"type": "string"}, "pam_position": {"type": "integer"}}, "required": ["target", "pam_position"]}}},
-    {"type": "function", "function": {"name": "get_gene_info", "description": "Retrieve gene information from GenomeCRISPR.", "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}},
-    {"type": "function", "function": {"name": "get_sgrnas", "description": "Retrieve sgRNAs associated with a gene from GenomeCRISPR.", "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}},
-    {"type": "function", "function": {"name": "get_screening_experiments", "description": "Retrieve CRISPR screening experiments from GenomeCRISPR.", "parameters": {"type": "object", "properties": {}}, "required": []}}]
+    {"type": "function", "function": {
+        "name": "get_crisprs_by_exon",
+        "description": "Retrieve CRISPR guides for a species and list of exon IDs.",
+        "parameters": {"type": "object", "properties": {"species": {"type": "string"}, "exon_ids": {"type": "array", "items": {"type": "string"}}}, "required": ["species", "exon_ids"]}
+    }},
+    {"type": "function", "function": {
+        "name": "get_off_targets",
+        "description": "Retrieve off-targets for a CRISPR sequence.",
+        "parameters": {"type": "object", "properties": {"species": {"type": "string"}, "sequence": {"type": "string"}, "pam_right": {"type": "boolean"}}, "required": ["species", "sequence", "pam_right"]}
+    }},
+    {"type": "function", "function": {
+        "name": "get_forecast_predictions",
+        "description": "Retrieve CRISPR editing predictions using Elixir Forecast API.",
+        "parameters": {"type": "object", "properties": {"target": {"type": "string"}, "pam_position": {"type": "integer"}}, "required": ["target", "pam_position"]}
+    }},
+    {"type": "function", "function": {
+        "name": "get_gene_info",
+        "description": "Retrieve gene information from GenomeCRISPR.",
+        "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}
+    }},
+    {"type": "function", "function": {
+        "name": "get_sgrnas",
+        "description": "Retrieve sgRNAs associated with a gene from GenomeCRISPR.",
+        "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}
+    }},
+    {"type": "function", "function": {
+        "name": "get_screening_experiments",
+        "description": "Retrieve CRISPR screening experiments based on a gene symbol.",
+        "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}
+    }},
+]
 
-system_prompt = "You are an assistant that helps find CRISPR guides, off-targets, gene information, and screening experiments."
+system_prompt = "You are an assistant that helps find CRISPR guides, off-targets, and gene information."
 
 # ----------------------------
-# User Input
+# User Interaction
 # ----------------------------
 
-user_input = input("Enter your request (e.g., gene info for POLR2A, guides for exon ENSMUSE00000106755): ")
+user_input = input("Enter your request (e.g., 'gene info for POLR2A', 'guides for exon ENSMUSE00000106755', 'screening experiments for POLR2A'): ")
 messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_input}]
 
 # ----------------------------
-# Call OpenAI model
+# Call OpenAI Model
 # ----------------------------
 
 completion = client.chat.completions.create(model="gpt-4o", messages=messages, tools=tools)
@@ -86,31 +145,16 @@ if completion.choices and completion.choices[0].message.tool_calls:
     print("Function:", function_name)
     print("Arguments:", function_args)
 
-    def call_function(name, args):
-        if name == "get_crisprs_by_exon":
-            return get_crisprs_by_exon(args["species"], args["exon_ids"])
-        elif name == "get_off_targets":
-            return get_off_targets(args["species"], args["sequence"], args["pam_right"])
-        elif name == "get_forecast_predictions":
-            return get_forecast_predictions(args["target"], args["pam_position"])
-        elif name == "get_gene_info":
-            return get_gene_info(args["symbol"])
-        elif name == "get_sgrnas":
-            return get_sgrnas(args["symbol"])
-        elif name == "get_screening_experiments":
-            return get_screening_experiments()
-        else:
-            print("Unknown function:", name)
-            return None
-
-    result = call_function(function_name, function_args)
-    
-    if result:
-        print("\nFunction Result:", json.dumps(result, indent=2))
+    # Call the corresponding function dynamically
+    func = function_map.get(function_name)
+    if func:
+        result = func(**function_args)
+        print("\nFunction Result:", json.dumps(result, indent=2) if result else "\nNo results returned.")
     else:
-        print("\nNo results returned from the function call.")
+        print(f"Unknown function: {function_name}")
 else:
     print("GPT did not decide to call any function.")
+
 
 
 

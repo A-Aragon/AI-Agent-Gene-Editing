@@ -1,13 +1,19 @@
 import requests
 
 def get_gene_info(symbol):
-    """Consulta la API de GenomeCRISPR para obtener la información de un gen por su símbolo."""
+    """Consulta la API de GenomeCRISPR y devuelve la información completa del gen con la lista de PubMed IDs al final."""
     url = "https://genomecrispr.dkfz.de/api/genes"
     headers = {"Content-Type": "application/json"}
     data = {"query": symbol, "field": "symbol"}
 
     response = requests.post(url, headers=headers, json=data)
-    return response.json() if response.status_code == 200 else None
+    if response.status_code == 200:
+        gene_data = response.json()
+        pubmed_ids = gene_data.get("pubmed", [])  # Obtiene la lista de PubMed IDs, o una lista vacía si no hay.
+        gene_data["pubmed_ids"] = pubmed_ids  # Agrega la lista de PubMed IDs a la respuesta.
+        return gene_data  # Devuelve la información completa del gen con la lista de PubMed IDs.
+    else:
+        return None  # Devuelve None si la solicitud falla.
 
 def get_sgrnas(symbol):
     """Consulta la API de GenomeCRISPR para obtener los sgRNAs relacionados con un gen."""
@@ -18,19 +24,11 @@ def get_sgrnas(symbol):
     response = requests.post(url, headers=headers, json=data)
     return response.json() if response.status_code == 200 else None
 
-def get_screening_experiments():
+def get_screening_experiments(pubmed_ids):
     """Consulta la API de GenomeCRISPR para obtener experimentos de screening CRISPR."""
     url = "https://genomecrispr.dkfz.de/api/experiments"
     headers = {"Content-Type": "application/json"}
-    data = {
-        "pubmed": {
-            "$in": [
-                "26472758", "26627737", "24336569", "25494202", "27260157", "27013184",
-                "27453484", "24336571", "27383988", "26780180", "27760321", "27661255",
-                "27260156", "27869803", "28162770", "999999", "28145866", "28700943", "29083409"
-            ]
-        }
-    }
+    data = {"pubmed": {"$in": pubmed_ids}}
 
     response = requests.post(url, headers=headers, json=data)
     return response.json() if response.status_code == 200 else None
@@ -42,18 +40,18 @@ def display_gene_info(gene_data):
         return
 
     print("\n=== Información del Gen ===")
-    print(f"🔹 Símbolo: {gene_data.get('symbol', 'N/A')}")
-    print(f"🔹 ID Ensembl: {gene_data.get('ensg', 'N/A')}")
-    print(f"🔹 Cromosoma: {gene_data.get('chr', 'N/A')} (Strand: {gene_data.get('strand', 'N/A')})")
-    print(f"🔹 Posición: {gene_data.get('start', 'N/A')} - {gene_data.get('end', 'N/A')}")
-    print("\n🔹 Secuencia (primeros 100 nucleótidos):")
+    print(f" Símbolo: {gene_data.get('symbol', 'N/A')}")
+    print(f" ID Ensembl: {gene_data.get('ensg', 'N/A')}")
+    print(f" Cromosoma: {gene_data.get('chr', 'N/A')} (Strand: {gene_data.get('strand', 'N/A')})")
+    print(f" Posición: {gene_data.get('start', 'N/A')} - {gene_data.get('end', 'N/A')}")
+    print("\n Secuencia (primeros 100 nucleótidos):")
     print(gene_data.get("seq", "N/A")[:100] + "...")
 
     print("\n=== Transcripciones ===")
     for transcript in gene_data.get("transcripts", []):
-        print(f"🔸 ID: {transcript.get('id', 'N/A')}")
+        print(f" ID: {transcript.get('id', 'N/A')}")
         for exon in transcript.get("exons", []):
-            print(f"   - Exón {exon.get('id', 'N/A')}: {exon.get('start', 'N/A')} - {exon.get('end', 'N/A')}")
+            print(f"  - Exón {exon.get('id', 'N/A')}: {exon.get('start', 'N/A')} - {exon.get('end', 'N/A')}")
         print("")
 
 def display_sgrnas(sgrna_data):
@@ -63,6 +61,7 @@ def display_sgrnas(sgrna_data):
         return
 
     print("\n=== sgRNAs Relacionados ===")
+    sgrna_pubmed_ids = []
     for sgrna in sgrna_data:
         position = f"{sgrna.get('start', 'N/A')}-{sgrna.get('end', 'N/A')}"
         sequence = sgrna.get('sequence', 'N/A')
@@ -71,8 +70,12 @@ def display_sgrnas(sgrna_data):
         effect = sgrna.get('effect', 'N/A')
         min_effect = effect  # Este dato puede ser extraído si se tiene información adicional, por ahora lo dejamos igual
         max_effect = effect  # Igual que el min_effect
+        pubmed_id = sgrna.get('pubmed', 'N/A')
+        if pubmed_id != 'N/A':
+            sgrna_pubmed_ids.append(pubmed_id)
 
-        print(f"🔸 Position: {position} | Sequence: {sequence} | PAM: {pam} | Target: {target} | Min Effect: {min_effect} | Max Effect: {max_effect} | Effect: {effect}")
+        print(f" Position: {position} | Sequence: {sequence} | PAM: {pam} | Target: {target} | Min Effect: {min_effect} | Max Effect: {max_effect} | Effect: {effect} | PubMed: {pubmed_id}")
+    return sgrna_pubmed_ids
 
 def display_screening_experiments(experiments):
     """Muestra la información de los experimentos de screening CRISPR en formato de tabla para cada publicación."""
@@ -86,8 +89,8 @@ def display_screening_experiments(experiments):
         authors = ', '.join([' '.join(author) for author in exp.get('authors', [])])
 
         print(f"\n=== PubMed ID: {pubmed_id} ===")
-        print(f"🔹 Título: {title}")
-        print(f"🔹 Autores: {authors}")
+        print(f" Título: {title}")
+        print(f" Autores: {authors}")
 
         print(f"\n{'Screen ID':<10} | {'Cell Line':<12} | {'Cas-9 Variant':<12} | {'Screen Type':<15} | {'Screen':<6} | {'Performance':<17} | {'Hit'}")
         print("-" * 100)
@@ -102,7 +105,7 @@ def display_screening_experiments(experiments):
                 min_fc = values.get("minfc", "N/A")
                 performance = f"{max_fc} / {min_fc}"
                 hit = values.get("hit", "N/A")
-                
+
                 print(f"{screen_id:<10} | {cell_line:<12} | {cas9_variant:<12} | {screen_type:<15} | {screen:<6} | {performance:<17} | {hit}")
 
         print("=" * 100)
@@ -116,9 +119,22 @@ display_gene_info(gene_data)
 
 # Obtener sgRNAs relacionados con el gen
 sgrna_data = get_sgrnas(symbol)
-display_sgrnas(sgrna_data)
+sgrna_pubmed_ids = display_sgrnas(sgrna_data)
 
-# Obtener experimentos de screening
-experiments = get_screening_experiments()
+# Obtener PubMed IDs únicos de sgrna_data y ordenarlos
+unique_pubmed_ids = sorted(list(set(sgrna_pubmed_ids)), key=int)
+
+# Mostrar PubMed IDs únicos de sgrna_data ordenados
+if unique_pubmed_ids:
+    print("\n=== PubMed IDs (sgRNAs) Ordenados ===")
+    print(unique_pubmed_ids)
+
+# Llamar a get_screening_experiments con los PubMed IDs únicos ordenados
+experiments = get_screening_experiments(unique_pubmed_ids)
 display_screening_experiments(experiments)
 
+# Mostrar PubMed IDs de gene_data
+if gene_data and gene_data.get("pubmed_ids"):
+    print("\n=== PubMed IDs (Gene Info) ===")
+    for pubmed_id in gene_data["pubmed_ids"]:
+        print(pubmed_id)
