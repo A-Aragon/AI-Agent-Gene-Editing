@@ -1,0 +1,96 @@
+import requests
+import urllib.parse
+import json
+
+def esearch(db, term, **kwargs):
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {"db": db, "term": term, "retmode": "json", "retmax": 20, "retstart": 0, "usehistory": "y"}
+    params.update(kwargs)
+    clean_params = {k: v for k, v in params.items() if v is not None}
+    full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
+    try:
+        response = requests.get(full_url)
+        response.raise_for_status()
+        data = response.json()
+        if "esearchresult" not in data:
+            raise ValueError("No esearchresult found.")
+        return data
+    except (requests.exceptions.RequestException, json.JSONDecodeError, ValueError) as e:
+        raise Exception(f"ESearch error: {e}")
+
+def esummary(db, ids, **kwargs):
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    params = {"db": db, "id": ",".join(ids), "retmode": "json"}
+    params.update(kwargs)
+    clean_params = {k: v for k, v in params.items() if v is not None}
+    full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
+    try:
+        response = requests.get(full_url)
+        response.raise_for_status()
+        return response.json()
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        raise Exception(f"ESummary error: {e}")
+
+def print_summary(summary_results):
+    if "result" in summary_results:
+        print("\nResúmenes de los documentos:")
+        for uid, summary in summary_results["result"].items():
+            if uid != "uids":
+                print(f"\nUID: {uid}")
+                print(f"Título: {summary.get('title', 'N/A')}")
+                if 'authors' in summary:
+                    print(f"Primer Autor: {summary['authors'][0]['name']}")
+                    print(f"Último Autor: {summary['authors'][-1]['name']}")
+                print(f"DOI: {summary.get('elocationid', 'N/A')}")
+                print(f"Fecha: {summary.get('pubdate', 'N/A')}")
+                print(f"Revista: {summary.get('source', 'N/A')}")
+    else:
+        print("No summaries found.")
+
+def get_database_list():
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi?retmode=json"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        return data["einforesult"]["dblist"] if "einforesult" in data and "dblist" in data["einforesult"] else None
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        print(f"Error getting database list: {e}")
+        return None
+
+if __name__ == "__main__":
+    databases = get_database_list()
+    if databases:
+        print("Available databases:")
+        for db in databases:
+            print(f"- {db}")
+    else:
+        print("Could not retrieve database list.")
+
+    db = input("Enter database (e.g., pubmed): ")
+    term = input("Enter search term: ")
+
+    kwargs = {}
+    if input("Filter by date? (y/n): ").lower() == "y":
+        kwargs["reldate"] = input("Days: ")
+        kwargs["datetype"] = input("Date type (e.g., edat): ")
+    if input("Set max results? (y/n): ").lower() == "y":
+        kwargs["retmax"] = input("Max results: ")
+    if input("Set return mode? (y/n): ").lower() == "y":
+        kwargs["retmode"] = input("Return mode (json/xml): ")
+
+    try:
+        results = esearch(db, term, **kwargs)
+        if results and "esearchresult" in results and results["esearchresult"]["count"] != "0":
+            uids = results["esearchresult"].get("idlist", [])
+            print("Found:", results["esearchresult"]["count"], "UIDs:", uids)
+            if input("Get summaries? (y/n): ").lower() == "y" and uids:
+                summary_results = esummary(db, uids)
+                if db.lower() == "pubmed":
+                    print_summary(summary_results)
+                else:
+                    print(json.dumps(summary_results, indent=4))
+        else:
+            print("No results found.")
+    except Exception as e:
+        print(f"Error: {e}")
