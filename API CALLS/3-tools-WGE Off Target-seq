@@ -2,25 +2,21 @@ import json
 import os
 import requests
 from openai import OpenAI
-from pydantic import BaseModel, Field
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ----------------------------
-# Función que llama a la API de WGE para obtener off-targets
+# API CALL 1 - Off-targets by sequence
 # ----------------------------
-
 def get_off_targets(species, sequence, pam_right):
-    """Recupera off-targets para una secuencia CRISPR usando la API de WGE."""
     url = "https://wge.stemcell.sanger.ac.uk/api/off_targets_by_seq"
     params = {
         "species": species,
         "seq": sequence,
-        "pam_right": str(pam_right).lower()
+        "pam_right": str(pam_right).lower()  # Convertir pam_right a 'true'/'false'
     }
-    
+
     response = requests.get(url, params=params)
-    
     if response.status_code == 200:
         return response.json()
     else:
@@ -28,9 +24,31 @@ def get_off_targets(species, sequence, pam_right):
         return None
 
 # ----------------------------
-# Definimos la herramienta
+# API CALL 2 - Off-targets details by CRISPR ID
 # ----------------------------
+def get_crispr_off_targets_by_id(species, crispr_id):
+    url = "https://wge.stemcell.sanger.ac.uk/api/crispr_off_targets"
+    data = {
+        "species": species,
+        "id": crispr_id,
+        "with_detail": 1
+    }
 
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+
+    response = requests.post(url, data=data, headers=headers)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print("Error:", response.status_code, response.text)
+        return None
+
+# ----------------------------
+# TOOLS
+# ----------------------------
 tools = [
     {
         "type": "function",
@@ -49,30 +67,62 @@ tools = [
             },
             "strict": True
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_crispr_off_targets_by_id",
+            "description": "Consulta por ID un sitio CRISPR y retorna su resumen y sitios off-target.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "species": {"type": "string"},
+                    "crispr_id": {"type": "string", "description": "ID del sitio CRISPR"}
+                },
+                "required": ["species", "crispr_id"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
     }
 ]
 
-system_prompt = "Eres un asistente que ayuda a encontrar off-targets para secuencias CRISPR."
+system_prompt = "Eres un asistente que ayuda a encontrar off-targets para secuencias CRISPR o IDs de CRISPR."
 
 # ----------------------------
-# Input del usuario
+# INPUT DEL USUARIO
 # ----------------------------
+user_input = input("Pregunta (e.g., Off-targets for sequence or CRISPR ID): ")
 
-user_input = input("Ask your question (e.g., Off-targets for sequence TTAATTGGTCAGCCTAACTC in Mouse): ")
-pam_right_input = input("Is the PAM on the right? (yes/no): ").strip().lower()
-pam_right = pam_right_input in ["yes", "y", "true"]
+if "id" in user_input.lower():
+    crispr_id = input("Introduce el CRISPR ID (ej. 356224): ")
+    species = input("Especie (Human o Mouse): ")
+    species = "grch38" if species.lower() == "human" else "grcm38"  # Ajuste automático de especie
+    selected_function = "get_crispr_off_targets_by_id"
+    arguments = {
+        "species": species,
+        "crispr_id": crispr_id
+    }
+else:
+    sequence = input("Introduce la secuencia CRISPR de 20bp: ")
+    species = input("Especie (Human o Mouse): ")
+    species = "grch38" if species.lower() == "human" else "grcm38"  # Ajuste automático de especie
+    pam_right_input = input("¿El PAM está a la derecha? (sí/no): ").strip().lower()
+    pam_right = pam_right_input in ["sí", "si", "yes", "y", "true"]
+    selected_function = "get_off_targets"
+    arguments = {
+        "species": species,
+        "sequence": sequence,
+        "pam_right": pam_right
+    }
 
-# Incluir explícitamente la información en el mensaje
-formatted_input = f"{user_input}. PAM on the right: {pam_right}"
-
+# ----------------------------
+# LLAMADA AL MODELO (registro)
+# ----------------------------
 messages = [
     {"role": "system", "content": system_prompt},
-    {"role": "user", "content": formatted_input},  # Se añade la información de PAM
+    {"role": "user", "content": user_input},
 ]
-
-# ----------------------------
-# Llamada al modelo
-# ----------------------------
 
 completion = client.chat.completions.create(
     model="gpt-4o",
@@ -80,61 +130,44 @@ completion = client.chat.completions.create(
     tools=tools,
 )
 
-# Mostrar qué decidió hacer GPT
-print("\nGPT decided to call:")
-print("Function:", completion.choices[0].message.tool_calls[0].function.name)
-print("Arguments:", json.loads(completion.choices[0].message.tool_calls[0].function.arguments))
+print("\nGPT decidió usar:")
+print("Función:", selected_function)
+print("Argumentos:", arguments)
 
 # ----------------------------
-# Ejecutamos la función real
+# LLAMADA A LA FUNCIÓN REAL
 # ----------------------------
-
 def call_function(name, args):
+    args["species"] = args["species"].capitalize()
     if name == "get_off_targets":
-        args['species'] = args['species'].capitalize()
-        args['pam_right'] = pam_right  # Aseguramos que se use la elección del usuario
         return get_off_targets(**args)
+    elif name == "get_crispr_off_targets_by_id":
+        return get_crispr_off_targets_by_id(**args)
 
-for tool_call in completion.choices[0].message.tool_calls:
-    name = tool_call.function.name
-    args = json.loads(tool_call.function.arguments)
-    messages.append(completion.choices[0].message)
+result = call_function(selected_function, arguments)
 
-    result = call_function(name, args)
-    messages.append({
-        "role": "tool",
-        "tool_call_id": tool_call.id,
-        "content": json.dumps(result)
-    })
+print("\nRESULTADO:")
+print(json.dumps(result, indent=2))
 
 # ----------------------------
-# Definimos el esquema del resultado
+# LÓGICA ADICIONAL: preguntar si quiere ver detalles del ID devuelto
 # ----------------------------
+if selected_function == "get_off_targets" and result and "id" in result:
+    view_details = input(f"\n¿Quieres ver el resumen detallado del ID {result['id']}? (sí/no): ").strip().lower()
+    if view_details in ["sí", "si", "yes", "y"]:
+        print(f"\nBuscando detalles para ID {result['id']}...\n")
+        detailed_result = get_crispr_off_targets_by_id(species.capitalize(), result["id"])
+        if detailed_result:
+            print("RESUMEN DETALLADO:")
+            print(json.dumps(detailed_result, indent=2))
 
-class OffTargetResponse(BaseModel):
-    sequence: str = Field(description="20bp CRISPR sequence")
-    off_targets: list[int] = Field(description="Lista de IDs de off-targets detectados")
-    off_target_summary: str = Field(description="Resumen de off-targets")
+            if not detailed_result[str(result["id"])]["off_target_details"]:
+                print("\n⚠️ Aviso: No hay detalles de off-targets registrados para este ID.")
+        else:
+            print("❌ Error al obtener el resumen detallado.")
+    else:
+        print("Resumen detallado omitido.")
 
-# ----------------------------
-# Segunda llamada a GPT con resultados reales
-# ----------------------------
 
-completion_2 = client.beta.chat.completions.parse(
-    model="gpt-4o",
-    messages=messages,
-    tools=tools,
-    response_format=OffTargetResponse,
-)
 
-# ----------------------------
-# Mostramos respuesta final
-# ----------------------------
 
-final_response = completion_2.choices[0].message.parsed
-
-print("\nOff-Targets retrieved:")
-print("Sequence:", final_response.sequence)
-print("Off-Target Summary:", final_response.off_target_summary)
-for i, off_target in enumerate(final_response.off_targets, 1):
-    print(f"{i}. {off_target}")
