@@ -71,25 +71,46 @@ if __name__ == "__main__":
     term = input("Enter search term: ")
 
     kwargs = {}
-    if input("Filter by date? (y/n): ").lower() == "y":
+    if input("Filter by date range? (y/n): ").lower() == "y":
+        kwargs["mindate"] = input("Start date (YYYY/MM/DD or<\ctrl3348>/MM or<\ctrl3348>): ")
+        kwargs["maxdate"] = input("End date (YYYY/MM/DD or<\ctrl3348>/MM or<\ctrl3348>): ")
+        print("\nAvailable Date Types to filter by:")
+        print("- pdat: Publication Date")
+        print("- edat: Entrez Date (date record was added to the database)")
+        print("- mdat: Modification Date (date record was last updated)")
+        print("- rdat: Revision Date (date of a revision to the record)")
+        kwargs["datetype"] = input("Enter Date Type (e.g., pdat): ")
+    elif input("Filter by relative date? (y/n): ").lower() == "y":
         kwargs["reldate"] = input("Days: ")
-        kwargs["datetype"] = input("Date type (e.g., edat): ")
-    if input("Set max results? (y/n): ").lower() == "y":
+        print("\nAvailable Date Types to filter by:")
+        print("- pdat: Publication Date")
+        print("- edat: Entrez Date (date record was added to the database)")
+        print("- mdat: Modification Date (date record was last updated)")
+        print("- rdat: Revision Date (date of a revision to the record)")
+        kwargs["datetype"] = input("Enter Date Type (e.g., edat): ")
+    if input("Set max results? (y/n) (by default 20): ").lower() == "y":
         kwargs["retmax"] = input("Max results: ")
-    if input("Set return mode? (y/n): ").lower() == "y":
-        kwargs["retmode"] = input("Return mode (json/xml): ")
+    else:
+        print("By default, the maximum number of results retrieved is set to 20.")
+
+    # Remove the return mode functionality
+    # if input("Set return mode? (y/n): ").lower() == "y":
+    #     kwargs["retmode"] = input("Return mode (json/xml): ")
 
     try:
         results = esearch(db, term, **kwargs)
-        if results and "esearchresult" in results and results["esearchresult"]["count"] != "0":
-            uids = results["esearchresult"].get("idlist", [])
-            print("Found:", results["esearchresult"]["count"], "UIDs:", uids)
-            if input("Get summaries? (y/n): ").lower() == "y" and uids:
-                summary_results = esummary(db, uids)
-                if db.lower() == "pubmed":
-                    print_summary(summary_results)
-                else:
-                    print(json.dumps(summary_results, indent=4))
+        if results and "esearchresult" in results:
+            if results["esearchresult"].get("count", "0") != "0":
+                uids = results["esearchresult"].get("idlist", [])
+                print("Found:", results["esearchresult"]["count"], "UIDs:", uids)
+                if input("Get summaries? (y/n): ").lower() == "y" and uids:
+                    summary_results = esummary(db, uids)
+                    if db.lower() == "pubmed":
+                        print_summary(summary_results)
+                    else:
+                        print(json.dumps(summary_results, indent=4))
+            else:
+                print("No results found.")
         else:
             print("No results found.")
     except Exception as e:
