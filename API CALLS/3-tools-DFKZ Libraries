@@ -109,29 +109,23 @@ def display_screening_experiments(experiments):
     for exp in experiments:
         pubmed_id = exp.get('pubmed', 'N/A')
         title = exp.get('title', 'N/A')
+        abstract = exp.get('abstract', 'N/A')
         authors = ', '.join([' '.join(author) for author in exp.get('authors', [])])
 
         print(f"\n=== PubMed ID: {pubmed_id} ===")
         print(f" Título: {title}")
         print(f" Autores: {authors}")
+        print(f"\n Abstract:\n {abstract}\n")
 
-        print(f"\n{'Screen ID':<10} | {'Cell Line':<12} | {'Cas-9 Variant':<12} | {'Screen Type':<15} | {'Screen':<6} | {'Performance':<17} | {'Hit'}")
-        print("-" * 100)
+        print(f"{'Screen ID':<10} | {'Cell Line':<12} | {'Assay Type'}")
+        print("-" * 60)
 
         for cell_line, details in exp.get("condition", {}).items():
-            for condition, values in details.items():
+            for assay_type, values in details.items():
                 screen_id = values.get("screenid", "N/A")
-                cas9_variant = values.get("cas9_variant", "N/A")
-                screen_type = values.get("screen_type", "N/A")
-                screen = values.get("screen", "N/A")
-                max_fc = values.get("maxfc", "N/A")
-                min_fc = values.get("minfc", "N/A")
-                performance = f"{max_fc} / {min_fc}"
-                hit = values.get("hit", "N/A")
+                print(f"{screen_id:<10} | {cell_line:<12} | {assay_type}")
+        print("=" * 80)
 
-                print(f"{screen_id:<10} | {cell_line:<12} | {cas9_variant:<12} | {screen_type:<15} | {screen:<6} | {performance:<17} | {hit}")
-
-        print("=" * 100)
 
 # Bucle interactivo principal
 while True:
