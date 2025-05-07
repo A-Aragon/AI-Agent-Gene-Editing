@@ -11,18 +11,36 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # ----------------------------
 
 def get_crisprs_by_exon(species, exon_ids):
-    """Esta es una API pública que devuelve guías CRISPR para IDs de exones."""
+    """Devuelve guías CRISPR para IDs de exones."""
     url = "https://wge.stemcell.sanger.ac.uk/api/crispr_search"
     params = {"species": species}
 
-    # Aquí corregimos: TODOS los exon_ids deben ir como `exon_id[]`
     for exon_id in exon_ids:
         params.setdefault("exon_id[]", []).append(exon_id)
 
     response = requests.get(url, params=params)
 
     if response.status_code == 200:
-        return response.json()
+        raw_data = response.json()
+        # Procesar el resultado para devolver solo los campos deseados
+        processed = {}
+        for exon_id, guides in raw_data.items():
+            processed[exon_id] = []
+            for guide in guides:
+                species_name = "Mouse" if guide.get("species_id") == 2 else "Human" if guide.get("species_id") == 4 else guide.get("species_id")
+                processed[exon_id].append({
+                    "id": guide.get("id"),
+                    "chr_name": guide.get("chr_name"),
+                    "chr_start": guide.get("chr_start"),
+                    "chr_end": guide.get("chr_end"),
+                    "seq": guide.get("seq"),
+                    "pam_right": guide.get("pam_right"),
+                    "ensembl_exon_id": guide.get("ensembl_exon_id"),
+                    "off_target_summary": guide.get("off_target_summary"),
+                    "exonic": guide.get("exonic"),
+                    "species": species_name
+                })
+        return processed
     else:
         print("Error:", response.status_code, response.text)
         return None
@@ -47,13 +65,12 @@ tools = [
                     }
                 },
                 "required": ["species", "exon_ids"],
-                "additionalProperties": False  # <-- Añadido aquí
+                "additionalProperties": False
             },
             "strict": True
         }
     }
 ]
-
 
 system_prompt = "Eres un asistente que ayuda a encontrar guías CRISPR para genes."
 
@@ -89,7 +106,6 @@ print("Arguments:", json.loads(completion.choices[0].message.tool_calls[0].funct
 
 def call_function(name, args):
     if name == "get_crisprs_by_exon":
-        # Capitalizamos la especie antes de llamar a la función
         args['species'] = args['species'].capitalize()
         return get_crisprs_by_exon(**args)
 
@@ -106,32 +122,18 @@ for tool_call in completion.choices[0].message.tool_calls:
     })
 
 # ----------------------------
-# Definimos el esquema del resultado
+# Mostrar respuesta final directamente (sin schema en este caso)
 # ----------------------------
 
-class CrisprResponse(BaseModel):
-    exon_id: str = Field(description="Exon ID")
-    crispr_guides: list[str] = Field(description="Lista de secuencias guía CRISPR")
-
-# ----------------------------
-# Segunda llamada a GPT con resultados reales
-# ----------------------------
-
-completion_2 = client.beta.chat.completions.parse(
-    model="gpt-4o",
-    messages=messages,
-    tools=tools,
-    response_format=CrisprResponse,
-)
-
-# ----------------------------
-# Mostramos respuesta final
-# ----------------------------
-
-final_response = completion_2.choices[0].message.parsed
+final_result = json.loads(messages[-1]["content"])
 
 print("\nCRISPR Guides retrieved:")
-print("Exon ID:", final_response.exon_id)
-for i, guide in enumerate(final_response.crispr_guides, 1):
-    print(f"{i}. {guide}")
+for exon_id, guides in final_result.items():
+    print(f"\nExon ID: {exon_id}")
+    for i, guide in enumerate(guides, 1):
+        print(f"  {i}. ID: {guide['id']}, Chr: {guide['chr_name']}, Start: {guide['chr_start']}, End: {guide['chr_end']}")
+        print(f"     Seq: {guide['seq']} | PAM Right: {guide['pam_right']} | Exonic: {guide['exonic']} | Species: {guide['species']}")
+        print(f"     Off-target summary: {guide['off_target_summary']}")
+
+
 
