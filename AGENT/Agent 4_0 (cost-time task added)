@@ -1,0 +1,221 @@
+import json
+import os
+import requests
+import time
+from typing import Annotated, TypedDict
+from dotenv import load_dotenv
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
+
+from langchain.chat_models import init_chat_model
+from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
+from langchain_tavily import TavilySearch
+from langchain_core.callbacks import get_openai_callback
+
+
+# === Load environment variables ===
+load_dotenv()
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if TAVILY_API_KEY is None:
+    raise ValueError("TAVILY_API_KEY environment variable not set.")
+if OPENAI_API_KEY is None:
+    raise ValueError("OPENAI_API_KEY environment variable not set.")
+
+
+# === Define Tools ===
+
+@tool
+def get_forecast_predictions(target: str, pam_position: int) -> dict:
+    """Retrieve predictions from the Elixir Forecast API for a CRISPR sequence."""
+    start_time = time.time()
+    url = "https://elixir.ut.ee/forecast/api/predict"
+    payload = {"target": target, "pam_position": pam_position}
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(url, json=payload, headers=headers)
+    end_time = time.time()
+    duration = end_time - start_time
+    if response.status_code == 200:
+        result = response.json()
+        print(f"Tool 'get_forecast_predictions' completed in {duration:.4f} seconds.")
+        print(f"Tool 'get_forecast_predictions' cost: N/A (External API).")
+        return result
+    else:
+        error_message = {"error": f"Status code {response.status_code}: {response.text}"}
+        print(f"Tool 'get_forecast_predictions' failed in {duration:.4f} seconds.")
+        print(f"Tool 'get_forecast_predictions' cost: N/A (External API).")
+        return error_message
+
+
+@tool
+def get_crisprs_by_exon(species: str, exon_ids: list[str]) -> dict:
+    """Retrieve CRISPR guides for a species and list of exon IDs using the WGE API."""
+    start_time = time.time()
+    url = "https://wge.stemcell.sanger.ac.uk/api/crispr_search"
+    params = {"species": species}
+    for exon_id in exon_ids:
+        params.setdefault("exon_id[]", []).append(exon_id)
+
+    response = requests.get(url, params=params)
+    end_time = time.time()
+    duration = end_time - start_time
+    if response.status_code == 200:
+        raw_data = response.json()
+        processed = {}
+        for exon_id, guides in raw_data.items():
+            processed[exon_id] = []
+            for guide in guides:
+                species_name = (
+                    "Mouse" if guide.get("species_id") == 2 else
+                    "Human" if guide.get("species_id") == 4 else
+                    guide.get("species_id")
+                )
+                processed[exon_id].append({
+                    "id": guide.get("id"),
+                    "chr_name": guide.get("chr_name"),
+                    "chr_start": guide.get("chr_start"),
+                    "chr_end": guide.get("chr_end"),
+                    "seq": guide.get("seq"),
+                    "pam_right": guide.get("pam_right"),
+                    "ensembl_exon_id": guide.get("ensembl_exon_id"),
+                    "off_target_summary": guide.get("off_target_summary"),
+                    "exonic": guide.get("exonic"),
+                    "species": species_name
+                })
+        print(f"Tool 'get_crisprs_by_exon' completed in {duration:.4f} seconds.")
+        print(f"Tool 'get_crisprs_by_exon' cost: N/A (External API).")
+        return processed
+    else:
+        error_message = {"error": f"Status code {response.status_code}: {response.text}"}
+        print(f"Tool 'get_crisprs_by_exon' failed in {duration:.4f} seconds.")
+        print(f"Tool 'get_crisprs_by_exon' cost: N/A (External API).")
+        return error_message
+
+
+# === Tavily Search Tool ===
+tavily_tool = TavilySearch(max_results=2)
+
+# === Tool List ===
+tools = [get_forecast_predictions, get_crisprs_by_exon, tavily_tool]
+
+
+# === State Schema ===
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+# === Initialize Chat Model and Bind Tools ===
+llm = init_chat_model("openai:gpt-4o")
+llm_with_tools = llm.bind_tools(tools)
+
+# === In-Memory Checkpoint (Memory) ===
+memory = MemorySaver()
+
+# === LangGraph Construction ===
+graph_builder = StateGraph(State)
+
+
+# === Chatbot Node ===
+def chatbot(state: State):
+    start_time = time.time()
+    with get_openai_callback() as cb:
+        result = llm_with_tools.invoke(state["messages"])
+    end_time = time.time()
+    duration = end_time - start_time
+    input_tokens = cb.prompt_tokens
+    output_tokens = cb.completion_tokens
+    total_tokens = cb.total_tokens
+    input_cost = (input_tokens / 1_000_000) * 2.50
+    output_cost = (output_tokens / 1_000_000) * 10.00
+    total_cost = input_cost + output_cost
+    print(f"Node 'chatbot' completed in {duration:.4f} seconds.")
+    print(f"Node 'chatbot' cost: Input ${input_cost:.6f}, Output ${output_cost:.6f}, Total ${total_cost:.6f} ({total_tokens} tokens).")
+    return {"messages": [result]}
+
+graph_builder.add_node("chatbot", chatbot)
+
+
+# === Custom ToolNode ===
+class BasicToolNode:
+    def __init__(self, tools: list) -> None:
+        self.tools_by_name = {tool.name: tool for tool in tools}
+
+    def __call__(self, inputs: dict):
+        start_time = time.time()
+        if messages := inputs.get("messages", []):
+            message = messages[-1]
+        else:
+            raise ValueError("No message found in input")
+        outputs = []
+        for tool_call in message.tool_calls:
+            tool_start_time = time.time()
+            tool_result = self.tools_by_name[tool_call["name"]].invoke(tool_call["args"])
+            tool_end_time = time.time()
+            tool_duration = tool_end_time - tool_start_time
+            print(f"Tool '{tool_call['name']}' invoked and completed in {tool_duration:.4f} seconds.")
+            # Cost of individual tool invocations (if LLM is involved internally by the tool) would need to be tracked within the tool's logic.
+            print(f"Tool '{tool_call['name']}' cost: N/A (See tool implementation for potential LLM costs).")
+            outputs.append(
+                ToolMessage(
+                    content=json.dumps(tool_result),
+                    name=tool_call["name"],
+                    tool_call_id=tool_call["id"],
+                )
+            )
+        end_time = time.time()
+        duration = end_time - start_time
+        print(f"Node 'tools' completed in {duration:.4f} seconds.")
+        print(f"Node 'tools' cost: N/A (Individual tool costs reported above).")
+        return {"messages": outputs}
+
+tool_node = BasicToolNode(tools=tools)
+graph_builder.add_node("tools", tool_node)
+
+
+# === Router for Conditional Tool Execution ===
+def route_tools(state: State):
+    messages = state.get("messages", [])
+    ai_message = messages[-1] if messages else None
+    if hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
+        return "tools"
+    return END
+
+
+# === Define Graph Edges ===
+graph_builder.add_conditional_edges("chatbot", route_tools, {"tools": "tools", END: END})
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+
+# === Compile Graph with Memory ===
+graph = graph_builder.compile(checkpointer=memory)
+
+
+# === Run Chatbot in CLI Loop ===
+def stream_graph_updates(user_input: str):
+    state = {"messages": [{"role": "user", "content": user_input}]}
+    start_time = time.time()
+    result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"\n🤖 Assistant: {result['messages'][-1].content}")
+    print(f"Total turn time: {duration:.4f} seconds.")
+    # The cost of the entire turn would be the sum of the costs of the individual nodes involved.
+    # We've already printed the cost per node.
+
+
+if __name__ == "__main__":
+    print("🔬 CRISPR Chatbot with Tools and Memory\nType 'quit' to exit.")
+    while True:
+        try:
+            user_input = input("🧑 User: ")
+            if user_input.lower() in {"quit", "exit", "q"}:
+                print("👋 Goodbye!")
+                break
+            stream_graph_updates(user_input)
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
