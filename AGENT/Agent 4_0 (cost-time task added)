@@ -13,7 +13,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from langchain_core.messages import ToolMessage
 from langchain_tavily import TavilySearch
-from langchain_core.callbacks import get_openai_callback
+from langchain.callbacks import get_openai_callback
 
 
 # === Load environment variables ===
@@ -42,12 +42,10 @@ def get_forecast_predictions(target: str, pam_position: int) -> dict:
     if response.status_code == 200:
         result = response.json()
         print(f"Tool 'get_forecast_predictions' completed in {duration:.4f} seconds.")
-        print(f"Tool 'get_forecast_predictions' cost: N/A (External API).")
         return result
     else:
         error_message = {"error": f"Status code {response.status_code}: {response.text}"}
         print(f"Tool 'get_forecast_predictions' failed in {duration:.4f} seconds.")
-        print(f"Tool 'get_forecast_predictions' cost: N/A (External API).")
         return error_message
 
 
@@ -87,12 +85,10 @@ def get_crisprs_by_exon(species: str, exon_ids: list[str]) -> dict:
                     "species": species_name
                 })
         print(f"Tool 'get_crisprs_by_exon' completed in {duration:.4f} seconds.")
-        print(f"Tool 'get_crisprs_by_exon' cost: N/A (External API).")
         return processed
     else:
         error_message = {"error": f"Status code {response.status_code}: {response.text}"}
         print(f"Tool 'get_crisprs_by_exon' failed in {duration:.4f} seconds.")
-        print(f"Tool 'get_crisprs_by_exon' cost: N/A (External API).")
         return error_message
 
 
@@ -109,7 +105,7 @@ class State(TypedDict):
 
 
 # === Initialize Chat Model and Bind Tools ===
-llm = init_chat_model("openai:gpt-4o")
+llm = init_chat_model("openai:gpt-4o-2024-08-06")
 llm_with_tools = llm.bind_tools(tools)
 
 # === In-Memory Checkpoint (Memory) ===
@@ -124,17 +120,19 @@ def chatbot(state: State):
     start_time = time.time()
     with get_openai_callback() as cb:
         result = llm_with_tools.invoke(state["messages"])
+        cost_info = {
+            "input_tokens": cb.prompt_tokens,
+            "output_tokens": cb.completion_tokens,
+            "total_tokens": cb.total_tokens,
+            "input_cost": (cb.prompt_tokens / 1_000_000) * 2.50,
+            "output_cost": (cb.completion_tokens / 1_000_000) * 10.00,
+            "total_cost": (cb.prompt_tokens / 1_000_000) * 2.50 + (cb.completion_tokens / 1_000_000) * 10.00,
+        }
     end_time = time.time()
     duration = end_time - start_time
-    input_tokens = cb.prompt_tokens
-    output_tokens = cb.completion_tokens
-    total_tokens = cb.total_tokens
-    input_cost = (input_tokens / 1_000_000) * 2.50
-    output_cost = (output_tokens / 1_000_000) * 10.00
-    total_cost = input_cost + output_cost
     print(f"Node 'chatbot' completed in {duration:.4f} seconds.")
-    print(f"Node 'chatbot' cost: Input ${input_cost:.6f}, Output ${output_cost:.6f}, Total ${total_cost:.6f} ({total_tokens} tokens).")
-    return {"messages": [result]}
+    print(f"Node 'chatbot' cost: Input ${cost_info['input_cost']:.6f}, Output ${cost_info['output_cost']:.6f}, Total ${cost_info['total_cost']:.6f} ({cost_info['total_tokens']} tokens).")
+    return {"messages": [result], "cost": cost_info} # Guardar la información del costo bajo la clave "cost"
 
 graph_builder.add_node("chatbot", chatbot)
 
@@ -158,7 +156,6 @@ class BasicToolNode:
             tool_duration = tool_end_time - tool_start_time
             print(f"Tool '{tool_call['name']}' invoked and completed in {tool_duration:.4f} seconds.")
             # Cost of individual tool invocations (if LLM is involved internally by the tool) would need to be tracked within the tool's logic.
-            print(f"Tool '{tool_call['name']}' cost: N/A (See tool implementation for potential LLM costs).")
             outputs.append(
                 ToolMessage(
                     content=json.dumps(tool_result),
@@ -169,7 +166,7 @@ class BasicToolNode:
         end_time = time.time()
         duration = end_time - start_time
         print(f"Node 'tools' completed in {duration:.4f} seconds.")
-        print(f"Node 'tools' cost: N/A (Individual tool costs reported above).")
+        print(f"Node 'tools' cost: tools APIs are Free!")
         return {"messages": outputs}
 
 tool_node = BasicToolNode(tools=tools)
@@ -195,16 +192,23 @@ graph = graph_builder.compile(checkpointer=memory)
 
 
 # === Run Chatbot in CLI Loop ===
+
 def stream_graph_updates(user_input: str):
     state = {"messages": [{"role": "user", "content": user_input}]}
+
     start_time = time.time()
-    result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
+    with get_openai_callback() as cb:
+        result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
     end_time = time.time()
-    duration = end_time - start_time
+
+    # Cálculo del coste a tu tarifa (2.50 $ prompt, 10 $ completion por millón)
+    coste_turno = (cb.prompt_tokens / 1_000_000) * 2.50 + \
+                  (cb.completion_tokens / 1_000_000) * 10.00
+
     print(f"\n🤖 Assistant: {result['messages'][-1].content}")
-    print(f"Total turn time: {duration:.4f} seconds.")
-    # The cost of the entire turn would be the sum of the costs of the individual nodes involved.
-    # We've already printed the cost per node.
+    print(f"Total turn time: {end_time - start_time:.4f} seconds.")
+    print(f"Total turn cost: ${coste_turno:.6f}")
+
 
 
 if __name__ == "__main__":

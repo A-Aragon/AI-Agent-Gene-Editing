@@ -1,6 +1,7 @@
 import json
 import os
 import requests
+import time
 from typing import Annotated, TypedDict
 from dotenv import load_dotenv
 
@@ -12,6 +13,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 from langchain_core.messages import ToolMessage
 from langchain_tavily import TavilySearch
+from langchain.callbacks import get_openai_callback
 
 
 # === Load environment variables ===
@@ -90,7 +92,7 @@ class State(TypedDict):
 
 
 # === Initialize Chat Model and Bind Tools ===
-llm = init_chat_model("openai:gpt-4")
+llm = init_chat_model("openai:gpt-4o-2024-08-06")
 llm_with_tools = llm.bind_tools(tools)
 
 # === In-Memory Checkpoint (Memory) ===
@@ -102,7 +104,9 @@ graph_builder = StateGraph(State)
 
 # === Chatbot Node ===
 def chatbot(state: State):
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+    result = llm_with_tools.invoke(state["messages"])
+    return {"messages": [result]}       # sin cost_info
+
 
 graph_builder.add_node("chatbot", chatbot)
 
@@ -154,19 +158,33 @@ graph = graph_builder.compile(checkpointer=memory)
 # === Run Chatbot in CLI Loop ===
 def stream_graph_updates(user_input: str):
     state = {"messages": [{"role": "user", "content": user_input}]}
-    result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
-    print(f"\n🤖 Assistant: {result['messages'][-1].content}\n")
+
+    start_time = time.time()
+    with get_openai_callback() as cb:
+        result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
+    end_time = time.time()
+
+    coste_turno = (cb.prompt_tokens / 1_000_000) * 2.50 + \
+                  (cb.completion_tokens / 1_000_000) * 10.00
+
+    last_message = result["messages"][-1]
+    content = getattr(last_message, "content", "[No content found]")
+
+    print(f"\n🤖 Assistant: {content}")
+    print(f"Total turn time: {end_time - start_time:.4f} seconds.")
+    print(f"Total turn cost: ${coste_turno:.6f}")
+
 
 
 if __name__ == "__main__":
     print("🔬 CRISPR Chatbot with Tools and Memory\nType 'quit' to exit.")
     while True:
         try:
-            user_input = input("🧑 User: ")
+            user_input = input("🧑 Do you need any assistance?: ")
             if user_input.lower() in {"quit", "exit", "q"}:
-                print("👋 Goodbye!")
+                print("👋 Goodbye! Have a nice day ")
                 break
             stream_graph_updates(user_input)
         except KeyboardInterrupt:
-            print("\n👋 Goodbye!")
+            print("\n👋 Goodbye! Have a nice day")
             break
