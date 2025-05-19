@@ -13,7 +13,7 @@ def get_off_targets(species, sequence, pam_right):
     params = {
         "species": species,
         "seq": sequence,
-        "pam_right": str(pam_right).lower()  # Convertir pam_right a 'true'/'false'
+        "pam_right": pam_right  # ya es 'true' o 'false' string
     }
 
     response = requests.get(url, params=params)
@@ -60,7 +60,7 @@ tools = [
                 "properties": {
                     "species": {"type": "string"},
                     "sequence": {"type": "string", "description": "20bp CRISPR sequence"},
-                    "pam_right": {"type": "boolean", "description": "True si el PAM está a la derecha, False en caso contrario."}
+                    "pam_right": {"type": "string", "description": "'true' si el PAM está a la derecha, 'false' en caso contrario."}
                 },
                 "required": ["species", "sequence", "pam_right"],
                 "additionalProperties": False
@@ -94,10 +94,19 @@ system_prompt = "Eres un asistente que ayuda a encontrar off-targets para secuen
 # ----------------------------
 user_input = input("Pregunta (e.g., Off-targets for sequence or CRISPR ID): ")
 
+def map_species(user_input):
+    user_input = user_input.strip().lower()
+    if user_input == "human":
+        return "grch38"
+    elif user_input == "mouse":
+        return "mouse"
+    else:
+        return user_input  # Por si alguien escribe directamente grch38 o mouse u otro valor
+
 if "id" in user_input.lower():
     crispr_id = input("Introduce el CRISPR ID (ej. 356224): ")
-    species = input("Especie (Human o Mouse): ")
-    species = "grch38" if species.lower() == "human" else "grcm38"  # Ajuste automático de especie
+    species_input = input("Especie (Human o Mouse): ")
+    species = map_species(species_input)
     selected_function = "get_crispr_off_targets_by_id"
     arguments = {
         "species": species,
@@ -105,10 +114,10 @@ if "id" in user_input.lower():
     }
 else:
     sequence = input("Introduce la secuencia CRISPR de 20bp: ")
-    species = input("Especie (Human o Mouse): ")
-    species = "grch38" if species.lower() == "human" else "grcm38"  # Ajuste automático de especie
+    species_input = input("Especie (Human o Mouse): ")
+    species = map_species(species_input)
     pam_right_input = input("¿El PAM está a la derecha? (sí/no): ").strip().lower()
-    pam_right = pam_right_input in ["sí", "si", "yes", "y", "true"]
+    pam_right = "true" if pam_right_input in ["sí", "si", "yes", "y", "true"] else "false"
     selected_function = "get_off_targets"
     arguments = {
         "species": species,
@@ -125,7 +134,7 @@ messages = [
 ]
 
 completion = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-4o-2024-08-06",
     messages=messages,
     tools=tools,
 )
@@ -138,7 +147,7 @@ print("Argumentos:", arguments)
 # LLAMADA A LA FUNCIÓN REAL
 # ----------------------------
 def call_function(name, args):
-    args["species"] = args["species"].capitalize()
+    # Aquí ya species está correcto ('grch38' o 'mouse')
     if name == "get_off_targets":
         return get_off_targets(**args)
     elif name == "get_crispr_off_targets_by_id":
@@ -156,7 +165,7 @@ if selected_function == "get_off_targets" and result and "id" in result:
     view_details = input(f"\n¿Quieres ver el resumen detallado del ID {result['id']}? (sí/no): ").strip().lower()
     if view_details in ["sí", "si", "yes", "y"]:
         print(f"\nBuscando detalles para ID {result['id']}...\n")
-        detailed_result = get_crispr_off_targets_by_id(species.capitalize(), result["id"])
+        detailed_result = get_crispr_off_targets_by_id(species, result["id"])
         if detailed_result:
             print("RESUMEN DETALLADO:")
             print(json.dumps(detailed_result, indent=2))
@@ -167,6 +176,7 @@ if selected_function == "get_off_targets" and result and "id" in result:
             print("❌ Error al obtener el resumen detallado.")
     else:
         print("Resumen detallado omitido.")
+
 
 
 
