@@ -105,13 +105,21 @@ if __name__ == "__main__":
     else:
         print("By default, the maximum number of results retrieved is set to 20.")
 
-    if input("Set sort order? (y/n): ").lower() == "y":
+    sort_input = input("Set sort order? (y/n): ").lower()
+    if sort_input == "y":
         print("\nAvailable sort options (depends on database):")
         print("- none: No sorting (default order)")
         print("- relevance: Sort by relevance (if supported)")
-        print("- organism_name: Sort alphabetically (e.g., in 'genome', 'assembly')")
-        print("- released: Sort by release date")
+        print("- pub+date: Publication date (PubMed)")
+        print("- first+author / last+author (PubMed)")
+        print("- journal (PubMed)")
+        print("- organism_name: Alphabetical by organism (Genome/Assembly)")
+        print("- released: Release date (Genome/Assembly)")
+        print("- accession, seq+length, mod+date (Nucleotide/Protein)")
         kwargs["sort"] = input("Enter sort order: ")
+    else:
+        kwargs["sort"] = "none"
+        print("Sort order set to 'none' (default).")
 
     try:
         results = esearch(db, term, **kwargs)
@@ -131,4 +139,5 @@ if __name__ == "__main__":
             print("No results found.")
     except Exception as e:
         print(f"Error: {e}")
+
 
