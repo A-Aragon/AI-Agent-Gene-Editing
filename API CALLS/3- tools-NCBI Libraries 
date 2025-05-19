@@ -4,7 +4,14 @@ import json
 
 def esearch(db, term, **kwargs):
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    params = {"db": db, "term": term, "retmode": "json", "retmax": 20, "retstart": 0, "usehistory": "y"}
+    params = {
+        "db": db,
+        "term": term,
+        "retmode": "json",
+        "retmax": 20,
+        "retstart": 0,
+        "usehistory": "y"
+    }
     params.update(kwargs)
     clean_params = {k: v for k, v in params.items() if v is not None}
     full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
@@ -20,7 +27,11 @@ def esearch(db, term, **kwargs):
 
 def esummary(db, ids, **kwargs):
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    params = {"db": db, "id": ",".join(ids), "retmode": "json"}
+    params = {
+        "db": db,
+        "id": ",".join(ids),
+        "retmode": "json"
+    }
     params.update(kwargs)
     clean_params = {k: v for k, v in params.items() if v is not None}
     full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
@@ -67,35 +78,40 @@ if __name__ == "__main__":
     else:
         print("Could not retrieve database list.")
 
-    db = input("Enter database (e.g., pubmed): ")
+    db = input("Enter database (e.g., pubmed, assembly): ")
     term = input("Enter search term: ")
 
     kwargs = {}
     if input("Filter by date range? (y/n): ").lower() == "y":
-        kwargs["mindate"] = input("Start date (YYYY/MM/DD or<\ctrl3348>/MM or<\ctrl3348>): ")
-        kwargs["maxdate"] = input("End date (YYYY/MM/DD or<\ctrl3348>/MM or<\ctrl3348>): ")
+        kwargs["mindate"] = input("Start date (YYYY/MM/DD or MM/YYYY or YYYY): ")
+        kwargs["maxdate"] = input("End date (YYYY/MM/DD or MM/YYYY or YYYY): ")
         print("\nAvailable Date Types to filter by:")
         print("- pdat: Publication Date")
-        print("- edat: Entrez Date (date record was added to the database)")
-        print("- mdat: Modification Date (date record was last updated)")
-        print("- rdat: Revision Date (date of a revision to the record)")
+        print("- edat: Entrez Date")
+        print("- mdat: Modification Date")
+        print("- rdat: Revision Date")
         kwargs["datetype"] = input("Enter Date Type (e.g., pdat): ")
     elif input("Filter by relative date? (y/n): ").lower() == "y":
         kwargs["reldate"] = input("Days: ")
         print("\nAvailable Date Types to filter by:")
         print("- pdat: Publication Date")
-        print("- edat: Entrez Date (date record was added to the database)")
-        print("- mdat: Modification Date (date record was last updated)")
-        print("- rdat: Revision Date (date of a revision to the record)")
+        print("- edat: Entrez Date")
+        print("- mdat: Modification Date")
+        print("- rdat: Revision Date")
         kwargs["datetype"] = input("Enter Date Type (e.g., edat): ")
-    if input("Set max results? (y/n) (by default 20): ").lower() == "y":
+
+    if input("Set max results? (y/n) (default is 20): ").lower() == "y":
         kwargs["retmax"] = input("Max results: ")
     else:
         print("By default, the maximum number of results retrieved is set to 20.")
 
-    # Remove the return mode functionality
-    # if input("Set return mode? (y/n): ").lower() == "y":
-    #     kwargs["retmode"] = input("Return mode (json/xml): ")
+    if input("Set sort order? (y/n): ").lower() == "y":
+        print("\nAvailable sort options (depends on database):")
+        print("- none: No sorting (default order)")
+        print("- relevance: Sort by relevance (if supported)")
+        print("- organism_name: Sort alphabetically (e.g., in 'genome', 'assembly')")
+        print("- released: Sort by release date")
+        kwargs["sort"] = input("Enter sort order: ")
 
     try:
         results = esearch(db, term, **kwargs)
@@ -115,3 +131,4 @@ if __name__ == "__main__":
             print("No results found.")
     except Exception as e:
         print(f"Error: {e}")
+
