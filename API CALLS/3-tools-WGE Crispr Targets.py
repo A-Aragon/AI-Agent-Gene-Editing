@@ -12,11 +12,25 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def get_crisprs_by_exon(species, exon_ids):
     """Devuelve guías CRISPR para IDs de exones."""
-    url = "https://wge.stemcell.sanger.ac.uk/api/crispr_search"
-    params = {"species": species}
+    
+    # Mapear especie para la API
+    species_map = {
+        "human": "Grch38",
+        "mouse": "Mouse"
+    }
+    
+    species_api = species_map.get(species.lower())
+    if not species_api:
+        raise ValueError(f"Especie no soportada: {species}. Usa 'human' o 'mouse'.")
 
-    for exon_id in exon_ids:
-        params.setdefault("exon_id[]", []).append(exon_id)
+    url = "https://wge.stemcell.sanger.ac.uk/api/crispr_search"
+    params = {
+        "species": species_api,
+    }
+    
+    # El parámetro exon_id[] debe ser repetido para cada exon_id
+    # requests maneja listas automáticamente, así que:
+    params["exon_id[]"] = exon_ids
 
     response = requests.get(url, params=params)
 
@@ -42,7 +56,7 @@ def get_crisprs_by_exon(species, exon_ids):
                 })
         return processed
     else:
-        print("Error:", response.status_code, response.text)
+        print(f"Error en API WGE: {response.status_code} {response.text}")
         return None
 
 # ----------------------------
@@ -78,7 +92,7 @@ system_prompt = "Eres un asistente que ayuda a encontrar guías CRISPR para gene
 # Input del usuario
 # ----------------------------
 
-user_input = input("Ask your question (e.g., CRISPR guides for exon ENSMUSE00000106755 in Mouse): ")
+user_input = input("Pregunta (e.g., CRISPR guides for exon ENSMUSE00000106755 in Mouse): ")
 
 messages = [
     {"role": "system", "content": system_prompt},
@@ -106,7 +120,14 @@ print("Arguments:", json.loads(completion.choices[0].message.tool_calls[0].funct
 
 def call_function(name, args):
     if name == "get_crisprs_by_exon":
-        args['species'] = args['species'].capitalize()
+        # Normalizar especie para que siempre sea "human" o "mouse"
+        species_map = {
+            "grch38": "human",
+            "human": "human",
+            "mouse": "mouse"
+        }
+        species_input = args.get("species", "").lower()
+        args["species"] = species_map.get(species_input, species_input)
         return get_crisprs_by_exon(**args)
 
 for tool_call in completion.choices[0].message.tool_calls:
@@ -127,13 +148,17 @@ for tool_call in completion.choices[0].message.tool_calls:
 
 final_result = json.loads(messages[-1]["content"])
 
-print("\nCRISPR Guides retrieved:")
-for exon_id, guides in final_result.items():
-    print(f"\nExon ID: {exon_id}")
-    for i, guide in enumerate(guides, 1):
-        print(f"  {i}. ID: {guide['id']}, Chr: {guide['chr_name']}, Start: {guide['chr_start']}, End: {guide['chr_end']}")
-        print(f"     Seq: {guide['seq']} | PAM Right: {guide['pam_right']} | Exonic: {guide['exonic']} | Species: {guide['species']}")
-        print(f"     Off-target summary: {guide['off_target_summary']}")
+if not final_result:
+    print("\nNo se recuperaron guías CRISPR.")
+else:
+    print("\nCRISPR Guides retrieved:")
+    for exon_id, guides in final_result.items():
+        print(f"\nExon ID: {exon_id}")
+        for i, guide in enumerate(guides, 1):
+            print(f"  {i}. ID: {guide['id']}, Chr: {guide['chr_name']}, Start: {guide['chr_start']}, End: {guide['chr_end']}")
+            print(f"     Seq: {guide['seq']} | PAM Right: {guide['pam_right']} | Exonic: {guide['exonic']} | Species: {guide['species']}")
+            print(f"     Off-target summary: {guide['off_target_summary']}")
+
 
 
 
