@@ -1,26 +1,35 @@
 import json
 import os
 import re
+import time
 import requests
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-def get_forecast_predictions(target, pam_position, context):
+def get_forecast_predictions(target, pam_position, context, retries=2, delay=1):
+    """
+    Llama a la API de Elixir Forecast para un contexto específico, con reintentos en caso de fallo.
+    """
     url = "https://elixir.ut.ee/forecast-repair/api/predict"
     payload = {"target": target, "pam_position": pam_position, "context": context}
     headers = {"Content-Type": "application/json"}
 
-    response = requests.post(url, json=payload, headers=headers)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print("[ERROR] API Response:", response.status_code, response.text)
-        return None
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(url, json=payload, headers=headers)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"[ERROR] Intento {attempt}: Contexto={context} | API Response: {response.status_code} {response.text}")
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR] Intento {attempt}: Error de conexión para {context}: {e}")
+        if attempt < retries:
+            time.sleep(delay)
+    return None
 
 # Clasificación de mutaciones
-
 def classify_mutation_type(mutation):
     if mutation.startswith("I1"):
         return "Ins (1bp)"
@@ -38,16 +47,15 @@ def classify_mutation_type(mutation):
     return "Otro tipo"
 
 # Procesamiento de respuesta
-
 def parse_all_predictions(response_data):
     forecasts = []
     try:
-        rows = response_data["data"].split("\n")[1:]
+        rows = response_data.get("data", "").split("\n")[1:]
         for row in rows:
             mutation_data = row.split(",")
             if len(mutation_data) >= 4:
                 mutation = mutation_data[1]
-                inserted_sequence = mutation_data[2] if mutation_data[2] != "" else "No insertada"
+                inserted_sequence = mutation_data[2] or "No insertada"
                 prediction_score = float(mutation_data[3])
                 forecasts.append({
                     "mutation": mutation,
@@ -59,29 +67,57 @@ def parse_all_predictions(response_data):
         print(f"[ERROR] Error procesando datos de la API: {e}")
     return forecasts
 
+# Filtrar top N predicciones
 def get_top_predictions(forecasts, top_n=10):
     return sorted(forecasts, key=lambda x: x['prediction_score'], reverse=True)[:top_n]
 
-# Solicitar datos al usuario
-target_input = input("Introduce la secuencia CRISPR objetivo: ")
-pam_position_input = int(input("Introduce la posición del PAM: "))
-context_input = input("Introduce el contexto (Ej. Lig3, Dclre1c, Polq, etc.): ")
+if __name__ == '__main__':
+    # Lista válida de contextos
+    valid_contexts = {
+        "Ercc1", "Rad52", "Trp53", "Wrn", "MMEJ", "Lig1", "Lig3", "Nbn", "Parp1",
+        "Polq", "NHEJ", "Dclre1c", "Lig4", "Poll", "Polm", "Prkdc", "Trex1",
+        "Trp53Bp1", "Xlf", "Xrcc5", "other", "control"
+    }
 
-# Obtener respuesta de la API
-response = get_forecast_predictions(target_input, pam_position_input, context_input)
-if response and "data" in response:
-    parsed_predictions = parse_all_predictions(response)
-    top_predictions = get_top_predictions(parsed_predictions)
-    
-    print("\nTop 10 predicciones con mayor score:\n")
-    for i, forecast in enumerate(top_predictions, start=1):
-        print(f"{i}. Mutación: {forecast['mutation']}")
-        print(f"   Tipo de mutación: {forecast['type']}")
-        print(f"   Secuencia insertada: {forecast['inserted_sequence']}")
-        print(f"   Score de predicción: {forecast['prediction_score']:.6f}")
-        print("-" * 40)
-else:
-    print("[ERROR] No se recibió una respuesta válida de la API.")
+    print("Contextos válidos disponibles:")
+    print(", ".join(sorted(valid_contexts)))
+
+    # Solicitar datos al usuario
+    target_input = input("\nIntroduce la secuencia CRISPR objetivo: ")
+    pam_position_input = int(input("Introduce la posición del PAM: "))
+    contexts_raw = input("Introduce los contextos separados por comas (Ej. Lig3,Control): ")
+
+    # Preparar lista de contextos
+    context_list = [ctx.strip() for ctx in contexts_raw.split(",") if ctx.strip()]
+
+    # Validar contextos
+    invalid_contexts = [ctx for ctx in context_list if ctx not in valid_contexts]
+    context_list = [ctx for ctx in context_list if ctx in valid_contexts]
+
+    if invalid_contexts:
+        print(f"\n[ADVERTENCIA] Los siguientes contextos no son válidos y serán ignorados: {', '.join(invalid_contexts)}")
+
+    if not context_list:
+        print("[ERROR] No se introdujo ningún contexto válido. Por favor, inténtalo de nuevo.")
+        exit()
+
+    # Recorrer cada contexto y mostrar predicciones
+    for context in context_list:
+        print(f"\n=== Contexto: {context} ===")
+        response = get_forecast_predictions(target_input, pam_position_input, context)
+        if response and "data" in response:
+            parsed = parse_all_predictions(response)
+            top_preds = get_top_predictions(parsed)
+            print(f"Top {len(top_preds)} predicciones para {context}:\n")
+            for i, f in enumerate(top_preds, start=1):
+                print(f"{i}. Mutación: {f['mutation']}")
+                print(f"   Tipo: {f['type']}")
+                print(f"   Secuencia insertada: {f['inserted_sequence']}")
+                print(f"   Score: {f['prediction_score']:.6f}")
+                print("-" * 40)
+        else:
+            print(f"[ERROR] No se recibió respuesta válida para {context} tras {2} intentos.")
+
 
 
 
