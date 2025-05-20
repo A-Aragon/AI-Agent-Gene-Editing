@@ -1,0 +1,331 @@
+
+# -----------------------------------------------------------
+# LangGraph CRISPR assistant with grouped external tools
+# -----------------------------------------------------------
+
+import json
+import os
+import re
+import time
+import urllib.parse
+from typing import Annotated, Optional, TypedDict
+
+import requests
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langchain.callbacks import get_openai_callback
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langchain_tavily import TavilySearch
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  0.  ENV & CONSTANTS                                   │
+# ╰─────────────────────────────────────────────────────────╯
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+if not OPENAI_API_KEY or not TAVILY_API_KEY:
+    raise EnvironmentError("OPENAI_API_KEY / TAVILY_API_KEY missing in environment.")
+
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  1.  GROUPED TOOL #1  –  Elixir CRISPR Forecast         │
+# ╰─────────────────────────────────────────────────────────╯
+@tool
+def forecast_predictor(
+    target: str,
+    pam_position: int,
+    context: Optional[str] = None,
+) -> dict:
+    """
+    CRISPR repair-outcome predictions via Elixir Forecast.
+    - If *context* is omitted, calls the *basic* model.
+    - If *context* is provided, calls the *repair (context-aware)* model
+      and returns the top-10 mutations ranked by score.
+    """
+    def _classify(m: str) -> str:
+        if m.startswith("I1"):
+            return "Insertion (1 bp)"
+        if m.startswith("I"):
+            return "Insertion (>1 bp)"
+        if m.startswith("D"):
+            size = int(re.sub(r"\D", "", m) or 0)
+            if size <= 2:
+                return "Deletion (1-2 bp)"
+            if size <= 9:
+                return "Deletion (3-9 bp)"
+            return "Deletion (>9 bp)"
+        return "Other"
+
+    url = "https://elixir.ut.ee/forecast"
+    payload = {"target": target, "pam_position": pam_position}
+    headers = {"Content-Type": "application/json"}
+
+    # basic vs repair
+    if context:
+        url += "-repair/api/predict"
+        payload["context"] = context
+    else:
+        url += "/api/predict"
+
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        r.raise_for_status()
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    # If repair-aware, parse + return top-10
+    if context:
+        rows = r.json().get("data", "").splitlines()[1:]
+        preds = []
+        for row in rows:
+            cols = row.split(",")
+            if len(cols) >= 4:
+                preds.append(
+                    {
+                        "mutation": cols[1],
+                        "type": _classify(cols[1]),
+                        "inserted_sequence": cols[2] or "-",
+                        "prediction_score": float(cols[3]),
+                    }
+                )
+        preds.sort(key=lambda x: x["prediction_score"], reverse=True)
+        return {"top_predictions": preds[:10]}
+
+    return r.json()
+
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  2.  GROUPED TOOL #2  –  CRISPR Toolkit (WGE)           │
+# ╰─────────────────────────────────────────────────────────╯
+@tool
+def crispr_toolkit(
+    action: str,
+    species: str,
+    exon_ids: Optional[list[str]] = None,
+    seq: Optional[str] = None,
+    pam_right: Optional[bool] = None,
+    crispr_id: Optional[str] = None,
+) -> dict:
+    """
+    Combined WGE utilities.
+    ────────────────────────────────────────────
+    action = "guides_by_exon"
+        ▸ requires  exon_ids (list[str])
+    action = "off_targets_by_seq"
+        ▸ requires  seq (20 bp)  · pam_right (bool)
+    action = "off_targets_by_id"
+        ▸ requires  crispr_id (str)
+    species = "grch38" | "mouse" | …
+    """
+    base = "https://wge.stemcell.sanger.ac.uk/api"
+
+    try:
+        if action == "guides_by_exon":
+            if not exon_ids:
+                return {"error": "Missing exon_ids list."}
+            r = requests.get(
+                f"{base}/crispr_search",
+                params={"species": species, "exon_id[]": exon_ids},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        if action == "off_targets_by_seq":
+            if seq is None or pam_right is None:
+                return {"error": "Requires seq and pam_right."}
+            r = requests.get(
+                f"{base}/off_targets_by_seq",
+                params={"species": species, "seq": seq, "pam_right": str(pam_right).lower()},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        if action == "off_targets_by_id":
+            if not crispr_id:
+                return {"error": "Missing crispr_id."}
+            r = requests.post(
+                f"{base}/crispr_off_targets",
+                data={
+                    "species": species,
+                    "id": crispr_id,
+                    "with_detail": 1,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        return {"error": f"Unknown action '{action}'."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  3.  GROUPED TOOL #3  –  NCBI Entrez Utilities          │
+# ╰─────────────────────────────────────────────────────────╯
+@tool
+def ncbi_query_tool(
+    action: str,
+    db: Optional[str] = None,
+    term: Optional[str] = None,
+    ids: Optional[list[str]] = None,
+    **filters,
+) -> dict:
+    """
+    Unified access to NCBI eutils.
+    ────────────────────────────────────────────
+    action = "databases"          → returns list of DB names
+    action = "esearch"            → requires db & term  (accepts retmax, reldate, mindate, maxdate, sort, datetype…)
+    action = "esummary"           → requires db & ids (list[str])
+    """
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+    def _clean(d):  # drop None
+        return {k: v for k, v in d.items() if v is not None}
+
+    try:
+        if action == "databases":
+            r = requests.get(f"{base}/einfo.fcgi?retmode=json", timeout=20)
+            r.raise_for_status()
+            return r.json()
+
+        if action == "esearch":
+            if not db or not term:
+                return {"error": "Need db and term for esearch."}
+            params = _clean(
+                {
+                    "db": db,
+                    "term": term,
+                    "retmode": "json",
+                    "usehistory": "y",
+                    **filters,
+                }
+            )
+            url = f"{base}/esearch.fcgi?{urllib.parse.urlencode(params, safe=',')}"
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            return r.json()
+
+        if action == "esummary":
+            if not db or not ids:
+                return {"error": "Need db and ids list for esummary."}
+            params = _clean({"db": db, "id": ",".join(ids), "retmode": "json"})
+            url = f"{base}/esummary.fcgi?{urllib.parse.urlencode(params)}"
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            return r.json()
+
+        return {"error": f"Unknown action '{action}'."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  4.  Stand-alone Tool – Tavily Search                   │
+# ╰─────────────────────────────────────────────────────────╯
+tavily_tool = TavilySearch(max_results=2)  # already behaves like a @tool
+
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  5.  LangGraph setup                                    │
+# ╰─────────────────────────────────────────────────────────╯
+TOOLS = [forecast_predictor, crispr_toolkit, ncbi_query_tool, tavily_tool]
+
+
+class ChatState(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+llm = init_chat_model("openai:gpt-4o-2024-08-06")
+agent = llm.bind_tools(TOOLS)  # model can now call tools
+memory = MemorySaver()
+builder = StateGraph(ChatState)
+
+
+# ── Node 1:  LLM / Agent ─────────────────────────────────
+def llm_node(state: ChatState):
+    response = agent.invoke(state["messages"])
+    return {"messages": [response]}
+
+
+builder.add_node("agent", llm_node)
+
+
+# ── Node 2:  Tool executor ───────────────────────────────
+class ToolExecutor:
+    def __init__(self, tools):
+        self.by_name = {t.name: t for t in tools}
+
+    def __call__(self, state: ChatState):
+        last_msg = state["messages"][-1]
+        outputs = []
+        for call in last_msg.tool_calls:
+            tool_fn = self.by_name.get(call["name"])
+            result = (
+                tool_fn.invoke(call["args"]) if tool_fn else {"error": "Tool not registered"}
+            )
+            outputs.append(
+                ToolMessage(
+                    name=call["name"],
+                    tool_call_id=call["id"],
+                    content=json.dumps(result),
+                )
+            )
+        return {"messages": outputs}
+
+
+builder.add_node("tools", ToolExecutor(TOOLS))
+
+
+# ── Router: decide if the LLM requested a tool ───────────
+def route(state: ChatState):
+    last = state["messages"][-1]
+    return "tools" if getattr(last, "tool_calls", None) else END
+
+
+builder.add_conditional_edges("agent", route, {"tools": "tools", END: END})
+builder.add_edge("tools", "agent")
+builder.add_edge(START, "agent")
+
+graph = builder.compile(checkpointer=memory)
+
+
+# ╭─────────────────────────────────────────────────────────╮
+# │  6.  CLI driver                                         │
+# ╰─────────────────────────────────────────────────────────╯
+def chat_turn(user_text: str):
+    state = {"messages": [{"role": "user", "content": user_text}]}
+    start = time.time()
+    with get_openai_callback() as cb:
+        out_state = graph.invoke(state, config={"configurable": {"thread_id": "crispr"}})
+    elapsed = time.time() - start
+
+    final_msg = out_state["messages"][-1]
+    print(f"\n🤖  {getattr(final_msg, 'content', '[no content]')}")
+    print(
+        f"   · tokens used: {cb.total_tokens}   · cost: ${cb.total_cost:.4f}   · time: {elapsed:.2f} sec"
+    )
+
+
+if __name__ == "__main__":
+    print("🧬  CRISPR Chatbot – type 'quit' to exit.")
+    while True:
+        try:
+            user_inp = input("\n🧑‍🔬  You: ")
+            if user_inp.lower().strip() in {"quit", "exit"}:
+                print("👋  Bye!")
+                break
+            chat_turn(user_inp)
+        except KeyboardInterrupt:
+            print("\n👋  Bye!")
+            break
