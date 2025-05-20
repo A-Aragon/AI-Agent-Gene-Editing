@@ -34,6 +34,7 @@ if not OPENAI_API_KEY or not TAVILY_API_KEY:
 def forecast_basic(target: str, pam_position: int) -> dict:
     """
     CRISPR repair-outcome predictions via Elixir Forecast BASIC model.
+    Returns top-10 mutations ranked by prediction score.
     """
     url = "https://elixir.ut.ee/forecast/api/predict"
     payload = {"target": target, "pam_position": pam_position}
@@ -42,9 +43,43 @@ def forecast_basic(target: str, pam_position: int) -> dict:
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=30)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+
+        # Process the data to extract top-10 mutations
+        rows = data.get("data", "").splitlines()[1:]
+        preds = []
+        for row in rows:
+            cols = row.split(",")
+            if len(cols) >= 4:
+                preds.append({
+                    "mutation": cols[1],
+                    "type": _classify(cols[1]),
+                    "inserted_sequence": cols[2] or "-",
+                    "prediction_score": float(cols[3]),
+                })
+
+        # Sort predictions by score and return top-10
+        preds.sort(key=lambda x: x["prediction_score"], reverse=True)
+        return {"top_predictions": preds[:10]}
     except Exception as exc:
         return {"error": str(exc)}
+
+def _classify(m: str) -> str:
+    """
+    Classify mutation type.
+    """
+    if m.startswith("I1"):
+        return "Insertion (1 bp)"
+    if m.startswith("I"):
+        return "Insertion (>1 bp)"
+    if m.startswith("D"):
+        size = int(re.sub(r"\D", "", m) or 0)
+        if size <= 2:
+            return "Deletion (1-2 bp)"
+        if size <= 9:
+            return "Deletion (3-9 bp)"
+        return "Deletion (>9 bp)"
+    return "Other"
 
 @tool
 def forecast_repair(target: str, pam_position: int, context: str) -> dict:
