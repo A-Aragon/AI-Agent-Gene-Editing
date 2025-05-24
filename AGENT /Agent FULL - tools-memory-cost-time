@@ -45,41 +45,29 @@ def forecast_basic(target: str, pam_position: int) -> dict:
         r.raise_for_status()
         data = r.json()
 
-        # Process the data to extract top-10 mutations
-        rows = data.get("data", "").splitlines()[1:]
-        preds = []
-        for row in rows:
-            cols = row.split(",")
-            if len(cols) >= 4:
-                preds.append({
-                    "mutation": cols[1],
-                    "type": _classify(cols[1]),
-                    "inserted_sequence": cols[2] or "-",
-                    "prediction_score": float(cols[3]),
-                })
+        # Check if the response contains the expected data structure
+        if isinstance(data, dict) and "data" in data:
+            # Process the data to extract top-10 mutations
+            rows = data["data"].splitlines()[1:]
+            preds = []
+            for row in rows:
+                cols = row.split(",")
+                if len(cols) >= 4:
+                    preds.append({
+                        "mutation": cols[1],
+                        "type": _classify(cols[1]),
+                        "inserted_sequence": cols[2] or "-",
+                        "prediction_score": float(cols[3]),
+                    })
 
-        # Sort predictions by score and return top-10
-        preds.sort(key=lambda x: x["prediction_score"], reverse=True)
-        return {"top_predictions": preds[:10]}
+            # Sort predictions by score and return top-10
+            preds.sort(key=lambda x: x["prediction_score"], reverse=True)
+            return {"top_predictions": preds[:10]}
+        else:
+            return {"error": "Unexpected API response format."}
     except Exception as exc:
         return {"error": str(exc)}
 
-def _classify(m: str) -> str:
-    """
-    Classify mutation type.
-    """
-    if m.startswith("I1"):
-        return "Insertion (1 bp)"
-    if m.startswith("I"):
-        return "Insertion (>1 bp)"
-    if m.startswith("D"):
-        size = int(re.sub(r"\D", "", m) or 0)
-        if size <= 2:
-            return "Deletion (1-2 bp)"
-        if size <= 9:
-            return "Deletion (3-9 bp)"
-        return "Deletion (>9 bp)"
-    return "Other"
 
 @tool
 def forecast_repair(target: str, pam_position: int, context: str) -> dict:
@@ -134,7 +122,7 @@ def crispr_toolkit(
     crispr_id: Optional[str] = None,
 ) -> dict:
     """
-    Combined WGE utilities.
+    Combined WGE utilities.z
     ────────────────────────────────────────────
     action = "guides_by_exon"
         ▸ requires  exon_ids (list[str])
@@ -289,39 +277,76 @@ def chatbot(state: State):
 
 graph_builder.add_node("chatbot", chatbot)
 
-# Custom ToolNode
+import hashlib
+import json
+import time
+
 class BasicToolNode:
     def __init__(self, tools: list) -> None:
         self.tools_by_name = {tool.name: tool for tool in tools}
+        self.attempted_tool_calls = set()
 
     def __call__(self, inputs: dict):
         start_time = time.time()
-        if messages := inputs.get("messages", []):
-            message = messages[-1]
-        else:
+        messages = inputs.get("messages", [])
+        if not messages:
             raise ValueError("No message found in input")
+
+        message = messages[-1]
         outputs = []
+
         for tool_call in message.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+
+            # Create a unique identifier for the tool call
+            tool_call_id = (tool_name, json.dumps(tool_args, sort_keys=True))
+
+            if tool_call_id in self.attempted_tool_calls:
+                print(f"⚠️ Skipping repeated tool call: {tool_name}")
+                continue
+
+            self.attempted_tool_calls.add(tool_call_id)
+
+            print(f"\n🔧 Calling tool: {tool_name}")
+            print(f"📦 Arguments: {json.dumps(tool_args, indent=2)}")
+
             tool_start_time = time.time()
-            tool_result = self.tools_by_name[tool_call["name"]].invoke(tool_call["args"])
-            tool_end_time = time.time()
-            tool_duration = tool_end_time - tool_start_time
-            print(f"Tool '{tool_call['name']}' invoked and completed in {tool_duration:.4f} seconds.")
+            try:
+                result = self.tools_by_name[tool_name].invoke(tool_args)
+                tool_end_time = time.time()
+                duration = tool_end_time - tool_start_time
+                print(f"✅ Tool '{tool_name}' executed in {duration:.4f} seconds.")
+
+                if isinstance(result, dict) and "error" in result:
+                    print(f"❌ Tool returned error: {result['error']}")
+                elif not result:
+                    print(f"⚠️ Tool returned empty result.")
+                else:
+                    snippet = json.dumps(result, indent=2)
+                    if len(snippet) > 1000:
+                        snippet = snippet[:1000] + "... [truncated]"
+                    print(f"📤 Tool result: {snippet}")
+            except Exception as e:
+                print(f"🔥 Exception in tool '{tool_name}': {e}")
+                result = {"error": str(e)}
+
             outputs.append(
                 ToolMessage(
-                    content=json.dumps(tool_result),
-                    name=tool_call["name"],
+                    content=json.dumps(result),
+                    name=tool_name,
                     tool_call_id=tool_call["id"],
                 )
             )
+
         end_time = time.time()
-        duration = end_time - start_time
-        print(f"Node 'tools' completed in {duration:.4f} seconds.")
-        print(f"Node 'tools' cost: tools APIs are Free!")
+        print(f"🔄 Node 'tools' total time: {end_time - start_time:.4f} seconds.")
         return {"messages": outputs}
+
 
 tool_node = BasicToolNode(tools=tools)
 graph_builder.add_node("tools", tool_node)
+
 
 # Router for Conditional Tool Execution
 def route_tools(state: State):
@@ -348,7 +373,7 @@ def stream_graph_updates(user_input: str):
         result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
     end_time = time.time()
 
-    # Cálculo del coste a tu tarifa (2.50 $ prompt, 10 $ completion por millón)
+    # Calculate the cost at your rate (2.50 $ prompt, 10 $ completion per million)
     coste_turno = (cb.prompt_tokens / 1_000_000) * 2.50 + \
                   (cb.completion_tokens / 1_000_000) * 10.00
 
@@ -368,6 +393,7 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
             break
+
 
 
 
