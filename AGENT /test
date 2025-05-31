@@ -1,0 +1,338 @@
+# crispr_chatbot.py
+# -----------------------------------------------------------
+# LangGraph CRISPR assistant with grouped external tools
+# (forecast_basic, forecast_repair, and WGE CRISPR Search removed)
+# -----------------------------------------------------------
+
+import json
+import os
+import time
+import urllib.parse
+from typing import Annotated, Optional, TypedDict
+
+import requests
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langchain.callbacks import get_openai_callback
+from langchain.schema import HumanMessage
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langchain_tavily import TavilySearch
+
+# Load environment variables
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+if not OPENAI_API_KEY or not TAVILY_API_KEY:
+    raise EnvironmentError("OPENAI_API_KEY / TAVILY_API_KEY missing in environment.")
+
+# ----------------------------
+# Define Tools (remaining only)
+# ----------------------------
+
+@tool
+def crispr_toolkit(
+    action: str,
+    species: str,
+    exon_ids: Optional[list[str]] = None,
+    seq: Optional[str] = None,
+    pam_right: Optional[bool] = None,
+    crispr_id: Optional[str] = None,
+) -> dict:
+    """
+    Combined WGE utilities.
+    ────────────────────────────────────────────
+    action = "guides_by_exon"
+        ▸ requires  exon_ids (list[str])
+    action = "off_targets_by_seq"
+        ▸ requires  seq (20 bp)  · pam_right (bool)
+    action = "off_targets_by_id"
+        ▸ requires  crispr_id (str)
+    species = "grch38" | "mouse" | …
+    """
+    base = "https://wge.stemcell.sanger.ac.uk/api"
+
+    # Normalize species name to match WGE expected values
+    species_map = {
+        "human": "Grch38",
+        "mouse": "Mouse",
+        "grch38": "Grch38",  # optional redundancy
+    }
+    species = species_map.get(species.lower(), species)
+
+    try:
+        if action == "guides_by_exon":
+            if not exon_ids:
+                return {"error": "Missing exon_ids list."}
+            r = requests.get(
+                f"{base}/crispr_search",
+                params={"species": species, "exon_id[]": exon_ids},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        if action == "off_targets_by_seq":
+            if seq is None or pam_right is None:
+                return {"error": "Requires seq and pam_right."}
+            r = requests.get(
+                f"{base}/off_targets_by_seq",
+                params={"species": species, "seq": seq, "pam_right": str(pam_right).lower()},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        if action == "off_targets_by_id":
+            if not crispr_id:
+                return {"error": "Missing crispr_id."}
+            r = requests.post(
+                f"{base}/crispr_off_targets",
+                data={
+                    "species": species,
+                    "id": crispr_id,
+                    "with_detail": 1,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        return {"error": f"Unknown action '{action}'."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+
+
+@tool
+def ncbi_query_tool(
+    action: str,
+    db: Optional[str] = None,
+    term: Optional[str] = None,
+    ids: Optional[list[str]] = None,
+    **filters,
+) -> dict:
+    """
+    Unified access to NCBI eutils.
+    ────────────────────────────────────────────
+    action = "databases"          → returns list of DB names
+    action = "esearch"            → requires db & term  (accepts retmax, reldate, mindate, maxdate, sort, datetype…)
+    action = "esummary"           → requires db & ids (list[str])
+    """
+    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+    def _clean(d):
+        return {k: v for k, v in d.items() if v is not None}
+
+    try:
+        if action == "databases":
+            r = requests.get(f"{base}/einfo.fcgi?retmode=json", timeout=20)
+            r.raise_for_status()
+            return r.json()
+
+        if action == "esearch":
+            if not db or not term:
+                return {"error": "Need db and term for esearch."}
+            params = _clean(
+                {
+                    "db": db,
+                    "term": term,
+                    "retmode": "json",
+                    "usehistory": "y",
+                    **filters,
+                }
+            )
+            url = f"{base}/esearch.fcgi?{urllib.parse.urlencode(params, safe=',')}"
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            return r.json()
+
+        if action == "esummary":
+            if not db or not ids:
+                return {"error": "Need db and ids list for esummary."}
+            params = _clean({"db": db, "id": ",".join(ids), "retmode": "json"})
+            url = f"{base}/esummary.fcgi?{urllib.parse.urlencode(params)}"
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            return r.json()
+
+        return {"error": f"Unknown action '{action}'."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+# Tavily Search Tool (unchanged)
+tavily_tool = TavilySearch(max_results=2)
+
+# Tool List (only the two remaining tools)
+tools = [crispr_toolkit, ncbi_query_tool, tavily_tool]
+
+# ----------------------------
+# State Schema
+# ----------------------------
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# ----------------------------
+# Initialize Chat Model and Bind Tools
+# ----------------------------
+llm = init_chat_model("openai:gpt-4o-2024-08-06")
+llm_with_tools = llm.bind_tools(tools)
+
+# In-Memory Checkpoint (Memory)
+memory = MemorySaver()
+
+# LangGraph Construction
+graph_builder = StateGraph(State)
+
+# ----------------------------
+# Chatbot Node
+# ----------------------------
+def chatbot(state: State):
+    start_time = time.time()
+    with get_openai_callback() as cb:
+        result = llm_with_tools.invoke(state["messages"])
+        cost_info = {
+            "input_tokens": cb.prompt_tokens,
+            "output_tokens": cb.completion_tokens,
+            "total_tokens": cb.total_tokens,
+            "input_cost": (cb.prompt_tokens / 1_000_000) * 2.50,
+            "output_cost": (cb.completion_tokens / 1_000_000) * 10.00,
+            "total_cost": (cb.prompt_tokens / 1_000_000) * 2.50 + (cb.completion_tokens / 1_000_000) * 10.00,
+        }
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"Node 'chatbot' completed in {duration:.4f} seconds.")
+    print(
+        f"Node 'chatbot' cost: Input ${cost_info['input_cost']:.6f}, "
+        f"Output ${cost_info['output_cost']:.6f}, "
+        f"Total ${cost_info['total_cost']:.6f} ({cost_info['total_tokens']} tokens)."
+    )
+    return {"messages": [result], "cost": cost_info}
+
+graph_builder.add_node("chatbot", chatbot)
+
+# ----------------------------
+# Tool-Execution Node
+# ----------------------------
+class BasicToolNode:
+    def __init__(self, tools: list) -> None:
+        self.tools_by_name = {tool.name: tool for tool in tools}
+        self.attempted_tool_calls = set()
+
+    def __call__(self, inputs: dict):
+        start_time = time.time()
+        messages = inputs.get("messages", [])
+        if not messages:
+            raise ValueError("No message found in input")
+
+        message = messages[-1]
+        outputs = []
+
+        for tool_call in message.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+
+            # Create a unique identifier for the tool call
+            tool_call_id = (tool_name, json.dumps(tool_args, sort_keys=True))
+
+            if tool_call_id in self.attempted_tool_calls:
+                print(f"⚠️ Skipping repeated tool call: {tool_name}")
+                continue
+
+            self.attempted_tool_calls.add(tool_call_id)
+
+            print(f"\n🔧 Calling tool: {tool_name}")
+            print(f"📦 Arguments: {json.dumps(tool_args, indent=2)}")
+
+            tool_start_time = time.time()
+            try:
+                result = self.tools_by_name[tool_name].invoke(tool_args)
+                tool_end_time = time.time()
+                duration = tool_end_time - tool_start_time
+                print(f"✅ Tool '{tool_name}' executed in {duration:.4f} seconds.")
+
+                if isinstance(result, dict) and "error" in result:
+                    print(f"❌ Tool returned error: {result['error']}")
+                elif not result:
+                    print(f"⚠️ Tool returned empty result.")
+                else:
+                    snippet = json.dumps(result, indent=2)
+                    if len(snippet) > 1000:
+                        snippet = snippet[:1000] + "... [truncated]"
+                    print(f"📤 Tool result: {snippet}")
+            except Exception as e:
+                print(f"🔥 Exception in tool '{tool_name}': {e}")
+                result = {"error": str(e)}
+
+            outputs.append(
+                ToolMessage(
+                    content=json.dumps(result),
+                    name=tool_name,
+                    tool_call_id=tool_call["id"],
+                )
+            )
+
+        end_time = time.time()
+        print(f"🔄 Node 'tools' total time: {end_time - start_time:.4f} seconds.")
+        return {"messages": outputs}
+
+tool_node = BasicToolNode(tools=tools)
+graph_builder.add_node("tools", tool_node)
+
+# ----------------------------
+# Router for Conditional Tool Execution
+# ----------------------------
+def route_tools(state: State):
+    messages = state.get("messages", [])
+    ai_message = messages[-1] if messages else None
+    if hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
+        return "tools"
+    return END
+
+# Define Graph Edges
+graph_builder.add_conditional_edges("chatbot", route_tools, {"tools": "tools", END: END})
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+
+# Compile Graph with Memory
+graph = graph_builder.compile(checkpointer=memory)
+
+# ----------------------------
+# Run Chatbot in CLI Loop
+# ----------------------------
+def stream_graph_updates(user_input: str):
+    state = {"messages": [{"role": "user", "content": user_input}]}
+
+    start_time = time.time()
+    with get_openai_callback() as cb:
+        result = graph.invoke(state, config={"configurable": {"thread_id": "1"}})
+    end_time = time.time()
+
+    # Calculate the cost at your rate (2.50 $ prompt, 10 $ completion per million)
+    coste_turno = (cb.prompt_tokens / 1_000_000) * 2.50 + \
+                  (cb.completion_tokens / 1_000_000) * 10.00
+
+    print(f"\n🤖 Assistant: {result['messages'][-1].content}")
+    print(f"Total turn time: {end_time - start_time:.4f} seconds.")
+    print(f"Total turn cost: ${coste_turno:.6f}")
+
+if __name__ == "__main__":
+    print("🔬 CRISPR Chatbot with Tools and Memory\nType 'quit' to exit.")
+    while True:
+        try:
+            user_input = input("🧑 User: ")
+            if user_input.lower() in {"quit", "exit", "q"}:
+                print("👋 Goodbye!")
+                break
+            stream_graph_updates(user_input)
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
