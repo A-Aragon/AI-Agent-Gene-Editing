@@ -282,66 +282,125 @@ def crispr_toolkit(
 
 
 @tool
-def ncbi_query_tool(
-    action: str,
-    db: Optional[str] = None,
-    term: Optional[str] = None,
-    ids: Optional[list[str]] = None,
-    **filters,
-) -> dict:
+def ncbi_list_databases_tool() -> Dict:
     """
-    Unified access to NCBI eutils.
-    ────────────────────────────────────────────
-    action = "databases"          → returns list of DB names
-    action = "esearch"            → requires db & term  (accepts retmax, reldate, mindate, maxdate, sort, datetype…)
-    action = "esummary"           → requires db & ids (list[str])
+    Obtiene la lista de bases de datos disponibles en NCBI (EInfo).
+    Retorna:
+      {
+        "databases": [<lista de strings>]
+      }
+    O bien {"error": "..."} en caso de fallo.
     """
-    base = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
-
-    def _clean(d):
-        return {k: v for k, v in d.items() if v is not None}
-
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi?retmode=json"
     try:
-        if action == "databases":
-            r = requests.get(f"{base}/einfo.fcgi?retmode=json", timeout=20)
-            r.raise_for_status()
-            return r.json()
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        dblist = data.get("einforesult", {}).get("dblist", None)
+        if dblist is None:
+            return {"error": "No se encontró 'dblist' en la respuesta de EInfo."}
+        return {"databases": dblist}
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        return {"error": f"EInfo error: {e}"}
 
-        if action == "esearch":
-            if not db or not term:
-                return {"error": "Need db and term for esearch."}
-            params = _clean(
-                {
-                    "db": db,
-                    "term": term,
-                    "retmode": "json",
-                    "usehistory": "y",
-                    **filters,
-                }
-            )
-            url = f"{base}/esearch.fcgi?{urllib.parse.urlencode(params, safe=',')}"
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            return r.json()
 
-        if action == "esummary":
-            if not db or not ids:
-                return {"error": "Need db and ids list for esummary."}
-            params = _clean({"db": db, "id": ",".join(ids), "retmode": "json"})
-            url = f"{base}/esummary.fcgi?{urllib.parse.urlencode(params)}"
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-            return r.json()
+@tool
+def ncbi_esearch_tool(
+    db: str,
+    term: str,
+    retmax: Optional[int] = 20,
+    retstart: Optional[int] = 0,
+    usehistory: Optional[str] = "y",
+    mindate: Optional[str] = None,
+    maxdate: Optional[str] = None,
+    datetype: Optional[str] = None,
+    reldate: Optional[int] = None,
+    sort: Optional[str] = None
+) -> Dict:
+    """
+    ESearch en NCBI Entrez:
+      - db: base de datos (e.g. "pubmed")
+      - term: término de búsqueda (e.g. "CRISPR AND cancer")
+      - retmax: máximo de resultados (default 20)
+      - retstart: índice inicial para paginación (default 0)
+      - usehistory: "y" o "n" (default "y")
+      - mindate, maxdate: para filtrar rango de fecha (formato YYYY/MM/DD o MM/YYYY o YYYY)
+      - datetype: uno de ["pdat","edat","mdat","rdat"]
+      - reldate: número de días relativos
+      - sort: orden (depende de la db; ej. "relevance", "pub+date", etc.)
+    Retorna:
+      {
+        "esearchresult": { … JSON bruto de ESearch … }
+      }
+    O bien {"error": "..."} en caso de fallo.
+    """
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": db,
+        "term": term,
+        "retmode": "json",
+        "retmax": retmax,
+        "retstart": retstart,
+        "usehistory": usehistory,
+        "mindate": mindate,
+        "maxdate": maxdate,
+        "datetype": datetype,
+        "reldate": reldate,
+        "sort": sort
+    }
+    # Quitar None
+    clean_params = {k: v for k, v in params.items() if v is not None}
+    full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
+    try:
+        resp = requests.get(full_url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if "esearchresult" not in data:
+            return {"error": "No se encontró 'esearchresult' en la respuesta de ESearch."}
+        return {"esearchresult": data["esearchresult"]}
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        return {"error": f"ESearch error: {e}"}
 
-        return {"error": f"Unknown action '{action}'."}
-    except Exception as exc:
-        return {"error": str(exc)}
+
+@tool
+def ncbi_esummary_tool(
+    db: str,
+    ids: List[str],
+    retmode: Optional[str] = "json"
+) -> Dict:
+    """
+    ESummary en NCBI Entrez:
+      - db: base de datos (e.g. "pubmed")
+      - ids: lista de UIDs como strings (e.g. ["12345","67890"])
+      - retmode: (default "json")
+    Retorna:
+      {
+        "esummaryresult": { … JSON bruto de ESummary … }
+      }
+    O bien {"error": "..."} en caso de fallo.
+    """
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    params = {
+        "db": db,
+        "id": ",".join(ids),
+        "retmode": retmode
+    }
+    clean_params = {k: v for k, v in params.items() if v is not None}
+    full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
+    try:
+        resp = requests.get(full_url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        # Devolver bajo llave "esummaryresult" para distinguirlo
+        return {"esummaryresult": data}
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        return {"error": f"ESummary error: {e}"}
 
 # Tavily Search Tool (unchanged)
 tavily_tool = TavilySearch(max_results=2)
 
 # Tool List (only the two remaining tools)
-tools = [crispr_toolkit, get_forecast_predictions_tool, ncbi_query_tool, get_forecast_repair_predictions_tool, tavily_tool]
+tools = [crispr_toolkit, get_forecast_predictions_tool, ncbi_list_databases_tool, ncbi_esearch_tool, ncbi_esummary_tool, get_forecast_repair_predictions_tool, tavily_tool]
 
 # ----------------------------
 # State Schema
