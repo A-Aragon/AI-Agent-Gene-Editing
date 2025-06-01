@@ -67,22 +67,64 @@ def get_forecast_predictions_tool(
     predictions = []
     for row in rows:
         mutation_data = row.split(",")
-        if len(mutation_data) >= 4:
-            mutation = mutation_data[1]
-            inserted_sequence = mutation_data[2] if mutation_data[2] != "" else "No insertada"
-            try:
-                prediction_score = float(mutation_data[3])
-            except ValueError:
-                continue
-            predictions.append({
-                "mutation": mutation,
-                "inserted_sequence": inserted_sequence,
-                "prediction_score": prediction_score
-            })
+        if len(mutation_data) < 4:
+            continue
 
-    # Sort and return top 10
-    sorted_predictions = sorted(predictions, key=lambda x: x["prediction_score"], reverse=True)
-    return {"top_10_predictions": sorted_predictions[:10]}
+        mutation_outcome = mutation_data[1]
+        inserted_sequence = mutation_data[2] if mutation_data[2] != "" else "No insertada"
+        try:
+            prediction_score = float(mutation_data[3])
+        except ValueError:
+            continue
+
+        # Clasificación del tipo de mutación
+        if mutation_outcome.startswith("I1"):
+            mutation_type = "Ins (1bp)"
+        elif mutation_outcome.startswith("I"):
+            mutation_type = "Inserción (>1 bp)"
+        elif mutation_outcome.startswith("D"):
+            m = re.match(r"D(\d+)", mutation_outcome)
+            size = int(m.group(1)) if m else 0
+            if size <= 2:
+                mutation_type = "Deleción (1-2 bp)"
+            elif 3 <= size <= 9:
+                mutation_type = "Deleción (3-9 bp)"
+            else:
+                mutation_type = "Deleción (>9 bp)"
+        else:
+            mutation_type = "Otro tipo"
+
+        predictions.append({
+            "mutation_outcome": mutation_outcome,
+            "mutation_type": mutation_type,
+            "inserted_sequence": inserted_sequence,
+            "prediction_score": prediction_score
+        })
+
+    top10 = sorted(predictions, key=lambda x: x["prediction_score"], reverse=True)[:10]
+
+    # Generar resumen
+    lines = []
+    for i, p in enumerate(top10, start=1):
+        seq_text = (
+            "No sequence inserted"
+            if p["inserted_sequence"] == "No insertada"
+            else f'Inserted sequence "{p["inserted_sequence"]}"'
+        )
+        score_str = f"{p['prediction_score']:.2f}"
+        line = (
+            f"{i}. **{p['mutation_type']}** "
+            f"(`{p['mutation_outcome']}`): {seq_text} "
+            f"with a prediction score of {score_str}."
+        )
+        lines.append(line)
+
+    summary = "\n".join(lines)
+
+    return {
+        "top_10_predictions": top10,
+        "summary": summary
+    }
 
 @tool
 def get_forecast_repair_predictions_tool(
