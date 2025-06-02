@@ -40,20 +40,31 @@ if not OPENAI_API_KEY or not TAVILY_API_KEY:
 # ----------------------------
 
 @tool
-def get_forecast_predictions_tool(
-    target: str,
-    pam_position: int
-) -> Dict:
+def get_forecast_predictions_tool(target: str, pam_position: int) -> Dict:
     """
-    Recovers the top 10 CRISPR edit outcome predictions from the Elixir Forecast API.
+    Fetch the top-10 CRISPR edit outcome predictions from Elixir-Forecast
+    and return them in a format that explicitly exposes the mutation outcomes.
 
-    target: Full CRISPR sequence.
-    pam_position: Position of the PAM within the target sequence.
+    Parameters
+    ----------
+    target : str
+        Full CRISPR target sequence (protospacer + PAM)
+    pam_position : int
+        0-based index of the PAM within `target`
+
+    Returns
+    -------
+    Dict
+        {
+            "results":               [<mutation_outcome>, ...],  # just strings
+            "top_10_predictions":    [<full-prediction-dict>, ...],
+            "summary":               "<markdown summary ready to print>"
+        }
     """
     url = "https://elixir.ut.ee/forecast/api/predict"
     payload = {"target": target, "pam_position": pam_position}
     headers = {"Content-Type": "application/json"}
-    
+
     response = requests.post(url, json=payload, headers=headers)
     if response.status_code != 200:
         return {
@@ -64,22 +75,22 @@ def get_forecast_predictions_tool(
     data = response.json()
     rows = data.get("data", {}).get("data", "").split("\n")[1:]  # skip header
 
-    predictions = []
+    predictions: List[Dict] = []
     for row in rows:
-        mutation_data = row.split(",")
-        if len(mutation_data) < 4:
+        cols = row.split(",")
+        if len(cols) < 4:
             continue
 
-        mutation_outcome = mutation_data[1]
-        inserted_sequence = mutation_data[2] if mutation_data[2] != "" else "No insertada"
+        mutation_outcome = cols[1]
+        inserted_sequence = cols[2] or "No insertada"
         try:
-            prediction_score = float(mutation_data[3])
+            prediction_score = float(cols[3])
         except ValueError:
             continue
 
-        # Clasificación del tipo de mutación
+        # classify by outcome code
         if mutation_outcome.startswith("I1"):
-            mutation_type = "Ins (1bp)"
+            mutation_type = "Ins (1 bp)"
         elif mutation_outcome.startswith("I"):
             mutation_type = "Inserción (>1 bp)"
         elif mutation_outcome.startswith("D"):
@@ -87,7 +98,7 @@ def get_forecast_predictions_tool(
             size = int(m.group(1)) if m else 0
             if size <= 2:
                 mutation_type = "Deleción (1-2 bp)"
-            elif 3 <= size <= 9:
+            elif size <= 9:
                 mutation_type = "Deleción (3-9 bp)"
             else:
                 mutation_type = "Deleción (>9 bp)"
@@ -101,29 +112,30 @@ def get_forecast_predictions_tool(
             "prediction_score": prediction_score
         })
 
+    # rank & keep top-10
     top10 = sorted(predictions, key=lambda x: x["prediction_score"], reverse=True)[:10]
 
-    # Generar resumen
-    lines = []
-    for i, p in enumerate(top10, start=1):
+    # plain list of mutation outcomes, in ranked order
+    results = [p["mutation_outcome"] for p in top10]
+
+    # human-friendly markdown summary
+    summary_lines = []
+    for i, p in enumerate(top10, 1):
         seq_text = (
             "No sequence inserted"
             if p["inserted_sequence"] == "No insertada"
             else f'Inserted sequence "{p["inserted_sequence"]}"'
         )
-        score_str = f"{p['prediction_score']:.2f}"
-        line = (
-            f"{i}. **{p['mutation_type']}** "
-            f"(`{p['mutation_outcome']}`): {seq_text} "
-            f"with a prediction score of {score_str}."
+        summary_lines.append(
+            f"{i}. **{p['mutation_type']}** (`{p['mutation_outcome']}`): "
+            f"{seq_text} (score {p['prediction_score']:.2f})"
         )
-        lines.append(line)
-
-    summary = "\n".join(lines)
+    summary = "\n".join(summary_lines)
 
     return {
-        "top_10_predictions": top10,
-        "summary": summary
+        "results": results,                 # ← just the mutation codes
+        "top_10_predictions": top10,        # ← full detail for power-users
+        "summary": summary                  # ← ready-to-print markdown
     }
 
 @tool
