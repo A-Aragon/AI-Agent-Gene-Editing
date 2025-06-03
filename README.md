@@ -10,6 +10,15 @@ This project is being developed as part of my master thesis (15 etcs) for the Ma
 
 # Demo website
 
+## WGE Off-Target API call
+
+https://github.com/user-attachments/assets/96d50ffc-16d0-437a-a0df-fbb570543be4
+
+## Forecast tools
+
+
+
+
 
 
 
