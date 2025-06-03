@@ -4,9 +4,9 @@ This project is being developed as part of my master thesis (15 etcs) for the Ma
 
 # Phases
 
-1 Gene editing tool calling through APIs
+1 Gene editing tool calling through APIs (FORECasT, FORECasT-Repair, WGE CRISPR Search, WGE Off-Targets, and NCBI Libraries)
 
-2 Web search calling 
+2 Web search calling (Tavily)
 
 # Demo website
 
