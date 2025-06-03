@@ -1,0 +1,696 @@
+# crispr_chatbot_gradio.py
+# -----------------------------------------------------------
+# LangGraph CRISPR assistant with Gradio UI
+# -----------------------------------------------------------
+
+import json
+import os
+import time
+import urllib.parse
+from typing import Annotated, Optional, TypedDict, List, Dict # Added List, Dict here for clarity
+import uuid # For unique thread IDs
+
+import requests
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langchain.callbacks import get_openai_callback
+from langchain.schema import HumanMessage # Make sure this is imported
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+from langchain_tavily import TavilySearch
+# from typing import Dict # Already imported via List, Dict
+# from langchain_core.tools import tool # Already imported
+# from typing import Dict, List # Already imported
+# from langchain_core.tools import tool # Already imported
+# import requests # Already imported
+import re
+
+import gradio as gr # Import Gradio
+
+# Load environment variables
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+if not OPENAI_API_KEY or not TAVILY_API_KEY:
+    raise EnvironmentError("OPENAI_API_KEY / TAVILY_API_KEY missing in environment.")
+
+# ----------------------------
+# Define Tools (remaining only)
+# ----------------------------
+
+@tool
+def get_forecast_predictions_tool(target: str, pam_position: int) -> Dict:
+    """
+    Fetch the top-10 CRISPR edit outcome predictions from Elixir-Forecast
+    and return them in a format that explicitly exposes the mutation outcomes.
+
+    Parameters
+    ----------
+    target : str
+        Full CRISPR target sequence (protospacer + PAM)
+    pam_position : int
+        0-based index of the PAM within `target`
+
+    Returns
+    -------
+    Dict
+        {
+            "results":               [<mutation_outcome>, ...],  # just strings
+            "top_10_predictions":    [<full-prediction-dict>, ...],
+            "summary":               "<markdown summary ready to print>"
+        }
+    """
+    url = "https://elixir.ut.ee/forecast/api/predict"
+    payload = {"target": target, "pam_position": pam_position}
+    headers = {"Content-Type": "application/json"}
+
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code != 200:
+        return {
+            "error": f"Forecast API error: {response.status_code}",
+            "detail": response.text
+        }
+
+    data = response.json()
+    rows = data.get("data", {}).get("data", "").split("\n")[1:]  # skip header
+
+    predictions: List[Dict] = []
+    for row in rows:
+        cols = row.split(",")
+        if len(cols) < 4:
+            continue
+
+        mutation_outcome = cols[1]
+        inserted_sequence = cols[2] or "No insertada"
+        try:
+            prediction_score = float(cols[3])
+        except ValueError:
+            continue
+
+        # classify by outcome code
+        if mutation_outcome.startswith("I1"):
+            mutation_type = "Ins (1 bp)"
+        elif mutation_outcome.startswith("I"):
+            mutation_type = "Inserción (>1 bp)"
+        elif mutation_outcome.startswith("D"):
+            m = re.match(r"D(\d+)", mutation_outcome)
+            size = int(m.group(1)) if m else 0
+            if size <= 2:
+                mutation_type = "Deleción (1-2 bp)"
+            elif size <= 9:
+                mutation_type = "Deleción (3-9 bp)"
+            else:
+                mutation_type = "Deleción (>9 bp)"
+        else:
+            mutation_type = "Otro tipo"
+
+        predictions.append({
+            "mutation_outcome": mutation_outcome,
+            "mutation_type": mutation_type,
+            "inserted_sequence": inserted_sequence,
+            "prediction_score": prediction_score
+        })
+
+    # rank & keep top-10
+    top10 = sorted(predictions, key=lambda x: x["prediction_score"], reverse=True)[:10]
+
+    # plain list of mutation outcomes, in ranked order
+    results = [p["mutation_outcome"] for p in top10]
+
+    # human-friendly markdown summary
+    summary_lines = []
+    for i, p in enumerate(top10, 1):
+        seq_text = (
+            "No sequence inserted"
+            if p["inserted_sequence"] == "No insertada"
+            else f'Inserted sequence "{p["inserted_sequence"]}"'
+        )
+        summary_lines.append(
+            f"{i}. **{p['mutation_type']}** (`{p['mutation_outcome']}`): "
+            f"{seq_text} (score {p['prediction_score']:.2f})"
+        )
+    summary = "\n".join(summary_lines)
+
+    return {
+        "results": results,                 # ← just the mutation codes
+        "top_10_predictions": top10,        # ← full detail for power-users
+        "summary": summary                  # ← ready-to-print markdown
+    }
+
+@tool
+def get_forecast_repair_predictions_tool(
+    target: str,
+    pam_position: int,
+    context: str,
+    retries: int = 2,
+    delay: int = 1
+) -> dict:
+    """
+    Calls the Elixir Forecast-Repair API for a given target, PAM position, and repair context.
+    Repeats up to `retries` times, sleeping `delay` seconds between attempts.
+    Returns parsed JSON on success, or an error dict on failure.
+
+    Arguments:
+      - target: Full CRISPR sequence (20nt + PAM, e.g. "ACGTTGAC...GGG")
+      - pam_position: integer index of the PAM (e.g. 17 if using zero-based)
+      - context: one of the valid repair contexts (e.g. "Lig3", "NHEJ", "control", etc.)
+      - retries: how many times to retry on failure (default 2)
+      - delay: seconds to wait between retries (default 1)
+    """
+    url = "https://elixir.ut.ee/forecast-repair/api/predict"
+    payload = {"target": target, "pam_position": pam_position, "context": context}
+    headers = {"Content-Type": "application/json"}
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                # Parse the CSV-like body into a list of dicts:
+                forecasts = []
+                rows = data.get("data", "").split("\n")[1:]  # skip header row
+                for row in rows:
+                    cols = row.split(",")
+                    if len(cols) >= 4:
+                        mutation_outcome = cols[1]
+                        inserted_seq = cols[2] or "No insertada"
+                        pred_score = float(cols[3])
+                        # classify mutation type
+                        if mutation_outcome.startswith("I1"):
+                            mut_type = "Ins (1bp)"
+                        elif mutation_outcome.startswith("I"):
+                            mut_type = "Inserción (>1 bp)"
+                        elif mutation_outcome.startswith("D"):
+                            m = re.match(r"D(\d+)", mutation_outcome)
+                            size = int(m.group(1)) if m else 0
+                            if size <= 2:
+                                mut_type = "Deleción (1-2 bp)"
+                            elif 3 <= size <= 9:
+                                mut_type = "Deleción (3-9 bp)"
+                            else:
+                                mut_type = "Deleción (>9 bp)"
+                        else:
+                            mut_type = "Otro tipo"
+
+                        forecasts.append({
+                            "mutation_outcome": mutation_outcome,
+                            "mutation_type": mut_type,
+                            "inserted_sequence": inserted_seq,
+                            "prediction_score": pred_score
+                        })
+                # Sort and return top 10
+                top10 = sorted(forecasts, key=lambda x: x["prediction_score"], reverse=True)[:10]
+                return {"top_10_repair_predictions": top10}
+            else:
+                print(f"[ERROR] Attempt {attempt}: context={context} | "
+                      f"Status {response.status_code} {response.text}")
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR] Attempt {attempt}: connection error for {context}: {e}")
+
+        if attempt < retries:
+            time.sleep(delay)
+
+    return {"error": f"No valid response after {retries} attempts for context='{context}'."}
+
+
+@tool
+def crispr_toolkit(
+    action: str,
+    species: str,
+    exon_ids: Optional[list[str]] = None,
+    seq: Optional[str] = None,
+    pam_right: Optional[bool] = None,
+    crispr_id: Optional[str] = None,
+) -> dict:
+    """
+    Combined WGE utilities.
+    ────────────────────────────────────────────
+    action = "guides_by_exon"
+        ▸ requires  exon_ids (list[str])
+    action = "off_targets_by_seq"
+        ▸ requires  seq (20 bp)  · pam_right (bool)
+    action = "off_targets_by_id"
+        ▸ requires  crispr_id (str)
+    species = "grch38" | "mouse" | …
+    """
+    base = "https://wge.stemcell.sanger.ac.uk/api"
+
+    # Normalize species name to match WGE expected values
+    species_map = {
+        "human": "Grch38",
+        "mouse": "Mouse",
+        "grch38": "Grch38",  # optional redundancy
+    }
+    species = species_map.get(species.lower(), species)
+
+    try:
+        if action == "guides_by_exon":
+            if not exon_ids:
+                return {"error": "Missing exon_ids list."}
+            r = requests.get(
+                f"{base}/crispr_search",
+                params={"species": species, "exon_id[]": exon_ids},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        if action == "off_targets_by_seq":
+            if seq is None or pam_right is None:
+                return {"error": "Requires seq and pam_right."}
+            r = requests.get(
+                f"{base}/off_targets_by_seq",
+                params={"species": species, "seq": seq, "pam_right": str(pam_right).lower()},
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        if action == "off_targets_by_id":
+            if not crispr_id:
+                return {"error": "Missing crispr_id."}
+            r = requests.post(
+                f"{base}/crispr_off_targets",
+                data={
+                    "species": species,
+                    "id": crispr_id,
+                    "with_detail": 1,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()
+
+        return {"error": f"Unknown action '{action}'."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+
+
+@tool
+def ncbi_list_databases_tool() -> Dict:
+    """
+    Obtiene la lista de bases de datos disponibles en NCBI (EInfo).
+    Retorna:
+      {
+        "databases": [<lista de strings>]
+      }
+    O bien {"error": "..."} en caso de fallo.
+    """
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/einfo.fcgi?retmode=json"
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        dblist = data.get("einforesult", {}).get("dblist", None)
+        if dblist is None:
+            return {"error": "No se encontró 'dblist' en la respuesta de EInfo."}
+        return {"databases": dblist}
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        return {"error": f"EInfo error: {e}"}
+
+
+@tool
+def ncbi_esearch_tool(
+    db: str,
+    term: str,
+    retmax: Optional[int] = 20,
+    retstart: Optional[int] = 0,
+    usehistory: Optional[str] = "y",
+    mindate: Optional[str] = None,
+    maxdate: Optional[str] = None,
+    datetype: Optional[str] = None,
+    reldate: Optional[int] = None,
+    sort: Optional[str] = None
+) -> Dict:
+    """
+    ESearch en NCBI Entrez:
+      - db: base de datos (e.g. "pubmed")
+      - term: término de búsqueda (e.g. "CRISPR AND cancer")
+      - retmax: máximo de resultados (default 20)
+      - retstart: índice inicial para paginación (default 0)
+      - usehistory: "y" o "n" (default "y")
+      - mindate, maxdate: para filtrar rango de fecha (formato YYYY/MM/DD o MM/YYYY o YYYY)
+      - datetype: uno de ["pdat","edat","mdat","rdat"]
+      - reldate: número de días relativos
+      - sort: orden (depende de la db; ej. "relevance", "pub+date", etc.)
+    Retorna:
+      {
+        "esearchresult": { … JSON bruto de ESearch … }
+      }
+    O bien {"error": "..."} en caso de fallo.
+    """
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": db,
+        "term": term,
+        "retmode": "json",
+        "retmax": retmax,
+        "retstart": retstart,
+        "usehistory": usehistory,
+        "mindate": mindate,
+        "maxdate": maxdate,
+        "datetype": datetype,
+        "reldate": reldate,
+        "sort": sort
+    }
+    # Quitar None
+    clean_params = {k: v for k, v in params.items() if v is not None}
+    full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
+    try:
+        resp = requests.get(full_url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        if "esearchresult" not in data:
+            return {"error": "No se encontró 'esearchresult' en la respuesta de ESearch."}
+        return {"esearchresult": data["esearchresult"]}
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        return {"error": f"ESearch error: {e}"}
+
+
+@tool
+def ncbi_esummary_tool(
+    db: str,
+    ids: List[str],
+    retmode: Optional[str] = "json"
+) -> Dict:
+    """
+    ESummary en NCBI Entrez:
+      - db: base de datos (e.g. "pubmed")
+      - ids: lista de UIDs como strings (e.g. ["12345","67890"])
+      - retmode: (default "json")
+    Retorna:
+      {
+        "esummaryresult": { … JSON bruto de ESummary … }
+      }
+    O bien {"error": "..."} en caso de fallo.
+    """
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    params = {
+        "db": db,
+        "id": ",".join(ids),
+        "retmode": retmode
+    }
+    clean_params = {k: v for k, v in params.items() if v is not None}
+    full_url = f"{base_url}?{urllib.parse.urlencode(clean_params)}"
+    try:
+        resp = requests.get(full_url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        # Devolver bajo llave "esummaryresult" para distinguirlo
+        return {"esummaryresult": data}
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        return {"error": f"ESummary error: {e}"}
+
+# Tavily Search Tool (unchanged)
+tavily_tool = TavilySearch(max_results=2)
+
+# Tool List (only the two remaining tools)
+tools = [crispr_toolkit, get_forecast_predictions_tool, ncbi_list_databases_tool, ncbi_esearch_tool, ncbi_esummary_tool, get_forecast_repair_predictions_tool, tavily_tool]
+
+# ----------------------------
+# State Schema
+# ----------------------------
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+# ----------------------------
+# Initialize Chat Model and Bind Tools
+# ----------------------------
+llm = init_chat_model("openai:gpt-4o-2024-08-06") # or your preferred model
+llm_with_tools = llm.bind_tools(tools)
+
+# In-Memory Checkpoint (Memory)
+memory = MemorySaver()
+
+# LangGraph Construction
+graph_builder = StateGraph(State)
+
+# ----------------------------
+# Chatbot Node
+# ----------------------------
+def chatbot(state: State):
+    start_time = time.time()
+    with get_openai_callback() as cb:
+        result = llm_with_tools.invoke(state["messages"])
+        cost_info = {
+            "input_tokens": cb.prompt_tokens,
+            "output_tokens": cb.completion_tokens,
+            "total_tokens": cb.total_tokens,
+            "input_cost": (cb.prompt_tokens / 1_000_000) * 2.50,
+            "output_cost": (cb.completion_tokens / 1_000_000) * 10.00,
+            "total_cost": (cb.prompt_tokens / 1_000_000) * 2.50 + (cb.completion_tokens / 1_000_000) * 10.00,
+        }
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"Node 'chatbot' completed in {duration:.4f} seconds.")
+    print(
+        f"Node 'chatbot' cost: Input ${cost_info['input_cost']:.6f}, "
+        f"Output ${cost_info['output_cost']:.6f}, "
+        f"Total ${cost_info['total_cost']:.6f} ({cost_info['total_tokens']} tokens)."
+    )
+    # The cost info is useful for debugging, but we only need messages for the graph state.
+    # If you want to display cost in UI, you'd need to handle it differently.
+    return {"messages": [result]} # Removed "cost": cost_info from here as State doesn't have it
+
+graph_builder.add_node("chatbot", chatbot)
+
+# ----------------------------
+# Tool-Execution Node
+# ----------------------------
+class BasicToolNode:
+    def __init__(self, tools: list) -> None:
+        self.tools_by_name = {tool.name: tool for tool in tools}
+        # For Gradio, each session (thread_id) should ideally have its own attempted_tool_calls.
+        # However, for simplicity, this global set will prevent re-running the exact same tool call
+        # with the exact same arguments across ALL sessions IF the BasicToolNode instance is shared.
+        # This is usually fine as identical calls are rare or intended.
+        self.attempted_tool_calls = set()
+
+
+    def __call__(self, inputs: dict):
+        start_time = time.time()
+        messages = inputs.get("messages", [])
+        if not messages:
+            raise ValueError("No message found in input")
+
+        message = messages[-1]
+        outputs = []
+
+        # Ensure message has tool_calls attribute
+        if not hasattr(message, "tool_calls") or not message.tool_calls:
+            # This can happen if the LLM decides not to call a tool after a tool's response
+            # or if it's the first message and no tool was called.
+            # In such cases, we might not need to do anything here or simply pass through.
+            # For now, we assume tool_calls will be present if this node is reached via the router.
+            print("Tool node called, but no tool_calls found in the last message.")
+            return {"messages": []} # Or handle as appropriate
+
+        for tool_call in message.tool_calls:
+            tool_name = tool_call["name"]
+            tool_args = tool_call["args"]
+
+            # Create a unique identifier for the tool call
+            tool_call_id_tuple = (tool_name, json.dumps(tool_args, sort_keys=True))
+
+            # This check might need refinement for a multi-user Gradio app if you want
+            # to allow the same tool call in different sessions.
+            # LangGraph's `thread_id` isolates conversations, so this check primarily
+            # prevents re-execution within the *same* conversational turn if the LLM
+            # mistakenly asks for the same tool twice.
+            if tool_call_id_tuple in self.attempted_tool_calls:
+                print(f"⚠️ Skipping repeated tool call in this turn: {tool_name}") # Clarified scope
+                # continue # Allow it for now, let LLM decide. Or re-enable if problematic.
+
+            self.attempted_tool_calls.add(tool_call_id_tuple) # Add after deciding to run
+
+            print(f"\n🔧 Calling tool: {tool_name}")
+            print(f"📦 Arguments: {json.dumps(tool_args, indent=2)}")
+
+            tool_start_time = time.time()
+            try:
+                result = self.tools_by_name[tool_name].invoke(tool_args)
+                tool_end_time = time.time()
+                duration = tool_end_time - tool_start_time
+                print(f"✅ Tool '{tool_name}' executed in {duration:.4f} seconds.")
+
+                if isinstance(result, dict) and "error" in result:
+                    print(f"❌ Tool returned error: {result['error']}")
+                elif not result: # Handles None or empty dict/list
+                    print(f"⚠️ Tool returned empty result.")
+                    result = {} # Ensure JSON serializable content
+                else:
+                    snippet = json.dumps(result, indent=2)
+                    if len(snippet) > 1000:
+                        snippet = snippet[:1000] + "... [truncated]"
+                    print(f"📤 Tool result: {snippet}")
+            except Exception as e:
+                print(f"🔥 Exception in tool '{tool_name}': {e}")
+                result = {"error": str(e)}
+
+            outputs.append(
+                ToolMessage(
+                    content=json.dumps(result), # Ensure result is JSON serializable
+                    name=tool_name,
+                    tool_call_id=tool_call["id"],
+                )
+            )
+        # Clear attempted tool calls for this specific invocation of the tool node.
+        # This allows the same tool to be called again in a later part of the same conversation if needed.
+        self.attempted_tool_calls.clear()
+
+        end_time = time.time()
+        print(f"🔄 Node 'tools' total time: {end_time - start_time:.4f} seconds.")
+        return {"messages": outputs}
+
+
+tool_node = BasicToolNode(tools=tools)
+graph_builder.add_node("tools", tool_node)
+
+# ----------------------------
+# Router for Conditional Tool Execution
+# ----------------------------
+def route_tools(state: State):
+    messages = state.get("messages", [])
+    ai_message = messages[-1] if messages else None
+    if hasattr(ai_message, "tool_calls") and ai_message.tool_calls:
+        return "tools"
+    return END
+
+# Define Graph Edges
+graph_builder.add_conditional_edges("chatbot", route_tools, {"tools": "tools", END: END})
+graph_builder.add_edge("tools", "chatbot")
+graph_builder.add_edge(START, "chatbot")
+
+# Compile Graph with Memory
+graph = graph_builder.compile(checkpointer=memory)
+
+
+# ----------------------------
+# Gradio Interface Function
+# ----------------------------
+def handle_chat_interaction(user_input: str, history: List[List[str]], thread_id_state: Optional[str]):
+    if not user_input:
+        # Handle cases like pressing enter with no input, or if history is just initialized
+        return "", history, thread_id_state
+
+    if thread_id_state is None:
+        thread_id_state = str(uuid.uuid4())
+        print(f"New Gradio session. Thread ID: {thread_id_state}")
+        # For a completely new session, LangGraph's MemorySaver will start fresh for this thread_id.
+        # No need to explicitly clear, as `graph.invoke` with a new `thread_id` starts a new history.
+        current_messages_for_graph = []
+    else:
+        # Retrieve existing messages for this thread from LangGraph's memory
+        # This ensures we continue the conversation
+        current_graph_state = graph.get_state(config={"configurable": {"thread_id": thread_id_state}})
+        if current_graph_state and current_graph_state.values['messages']:
+            current_messages_for_graph = current_graph_state.values['messages']
+        else:
+            # Should not happen if thread_id exists and had previous messages, but as a fallback
+            current_messages_for_graph = []
+            print(f"Warning: No messages found in graph state for existing thread_id: {thread_id_state}")
+
+
+    # Add the new user message to the list of messages for LangGraph
+    # LangGraph expects a list of LangChain message objects
+    graph_input_messages = current_messages_for_graph + [HumanMessage(content=user_input)]
+
+    print(f"\n--- Invoking Graph for Thread ID: {thread_id_state} ---")
+    print(f"Input messages to graph: {[msg.to_json() for msg in graph_input_messages]}")
+
+    start_time = time.time()
+    with get_openai_callback() as cb:
+        # Invoke the graph with the full message history for this turn
+        result_state = graph.invoke(
+            {"messages": graph_input_messages},
+            config={"configurable": {"thread_id": thread_id_state}}
+        )
+    end_time = time.time()
+
+    # The final AI response is the last message in the 'messages' list of the result state
+    ai_response_message = result_state['messages'][-1]
+    bot_response_content = ai_response_message.content
+
+    # Update Gradio chat history
+    history.append([user_input, bot_response_content])
+
+    # Cost and timing for the Gradio turn (covers all LLM calls in this graph.invoke)
+    coste_turno = (cb.prompt_tokens / 1_000_000) * 2.50 + \
+                  (cb.completion_tokens / 1_000_000) * 10.00
+    
+    print(f"🤖 Assistant: {bot_response_content}")
+    print(f"Total Gradio turn time: {end_time - start_time:.4f} seconds.")
+    print(f"Total Gradio turn cost: ${coste_turno:.6f} ({cb.total_tokens} tokens)")
+    print(f"--- End Graph Invocation for Thread ID: {thread_id_state} ---\n")
+
+    return "", history, thread_id_state
+
+
+# ----------------------------
+# Launch Gradio App
+# ----------------------------
+if __name__ == "__main__":
+    print("🔬 CRISPR Chatbot with Tools, Memory, and Gradio UI")
+
+    with gr.Blocks() as demo:
+        gr.Markdown("# 🔬 CRISPR Chatbot Assistant")
+        gr.Markdown(
+            "Ask questions about CRISPR, search for guides, "
+            "get forecast predictions, or search NCBI databases."
+        )
+        
+        chatbot_ui = gr.Chatbot(label="Conversation", height=600)
+        msg_textbox = gr.Textbox(
+            label="Your Message",
+            placeholder="Type your question or command here and press Enter...",
+            lines=2,
+        )
+        # Hidden state for thread_id
+        thread_id_state = gr.State(None) 
+        
+        clear_button = gr.Button("Clear Chat")
+
+        def clear_chat_history():
+            # This will reset the displayed history and the thread_id for the *current user session*
+            # LangGraph's memory for the old thread_id will still exist but won't be used
+            # for this session unless the same thread_id is somehow restored.
+            print("Clearing chat history for current Gradio session.")
+            return None, None, None # Clears chatbot UI, input textbox, and thread_id_state
+
+        msg_textbox.submit(
+            handle_chat_interaction,
+            [msg_textbox, chatbot_ui, thread_id_state],
+            [msg_textbox, chatbot_ui, thread_id_state],
+        )
+        clear_button.click(
+            clear_chat_history, 
+            [], 
+            [chatbot_ui, msg_textbox, thread_id_state]
+        )
+
+    # To get a shareable public link, set share=True
+    # demo.launch(share=True)
+    # For local development:
+    demo.launch()
+
+    # Old CLI loop - remove or comment out
+    # print("🔬 CRISPR Chatbot with Tools and Memory\nType 'quit' to exit.")
+    # while True:
+    #     try:
+    #         user_input = input("🧑 User: ")
+    #         if user_input.lower() in {"quit", "exit", "q"}:
+    #             print("👋 Goodbye!")
+    #             break
+    #         # stream_graph_updates(user_input) # This function is now effectively handle_chat_interaction
+    #     except KeyboardInterrupt:
+    #         print("\n👋 Goodbye!")
+    #         break
