@@ -20,8 +20,6 @@ This project is being developed as part of my master thesis (15 etcs) for the Ma
 
 ## WGE Off-Target API call
 
-https://github.com/user-attachments/assets/96d50ffc-16d0-437a-a0df-fbb570543be4
-
 https://github.com/user-attachments/assets/a59ebd70-3298-4dc7-9cdd-45d1b11701ce
 
 ## Forecast tools
