@@ -2,11 +2,17 @@
 
 This project is being developed as part of my master thesis (15 etcs) for the Master in Bioinformatics and Biostatistics at UOC university. 
 
-# Phases
+# Objectives
 
 1 Gene editing tool calling through APIs (FORECasT, FORECasT-Repair, WGE CRISPR Search, WGE Off-Targets, and NCBI Libraries)
 
 2 Web search calling (Tavily)
+
+# Folder Explanation
+
+*Agent* -> final agent code
+
+*Tools* -> Independent Tools API Calls
 
 # Demo website
 
