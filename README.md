@@ -10,9 +10,11 @@ This project is being developed as part of my master thesis (15 etcs) for the Ma
 
 # Folder Explanation
 
+*Tools* -> Independent Tools API Calls
+
 *Agent* -> final agent code
 
-*Tools* -> Independent Tools API Calls
+*Deployment* -> gradio agent code
 
 # Demo website
 
